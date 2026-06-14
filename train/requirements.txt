@@ -1,0 +1,33 @@
+# ── Core ML ────────────────────────────────────────────────────────────────────
+torch>=2.2.0
+torchvision>=0.17.0
+numpy>=1.24.0
+
+# ── TerraTorch + Prithvi-EO-2.0 ───────────────────────────────────────────────
+# Install on the GPU VM only (not needed for local --smoke-test runs).
+# Installs prithvi backbone, UPerNet decoder, and pretrained weights downloader.
+#   pip install terratorch
+#
+# TerraTorch pulls in timm (ViT backbone) and einops (temporal reshaping).
+# Verify installation:
+#   python -c "from terratorch.models import PrithviModelFactory; print('ok')"
+#
+# Pinned for reproducibility — update if IBM releases a newer compatible version:
+terratorch>=0.99.0
+timm>=0.9.12
+einops>=0.7.0
+
+# ── Visualisation ──────────────────────────────────────────────────────────────
+matplotlib>=3.7.0
+
+# ── Utilities ──────────────────────────────────────────────────────────────────
+tqdm>=4.66.0
+
+# ──────────────────────────────────────────────────────────────────────────────
+# GPU VM one-liner setup (after git clone / scp):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#   pip install terratorch timm einops matplotlib tqdm
+#
+# Local CPU smoke-test (no TerraTorch needed):
+#   pip install torch torchvision numpy matplotlib tqdm
+#   python train/train.py --smoke-test
