@@ -135,7 +135,7 @@ def load_model(
 
     # ── real path: requires TerraTorch ────────────────────────────────────────
     try:
-        from terratorch.models import PrithviModelFactory
+        from terratorch.models import EncoderDecoderFactory
     except ImportError:
         raise ImportError(
             '\n'
@@ -167,29 +167,36 @@ def load_model(
         print('[model] Band identifiers: plain strings (HLSBands enum unavailable)')
 
     # ── resolve backbone name ─────────────────────────────────────────────────
-    # TerraTorch registers Prithvi-EO-2.0 under a versioned name; try candidates
-    # in likely order and fall back to printing the registry so we know the exact key.
+    # EncoderDecoderFactory (the current non-deprecated API) accepts any registered
+    # backbone. Prithvi_EO_V2_300M was found in the registry (the old PrithviModelFactory
+    # rejected it only because it enforces a lowercase-prithvi naming convention).
+    # Try most-likely names in order; on total failure print timm-registered keys.
     _BACKBONE_CANDIDATES = [
-        'prithvi_eo_v2_300m',
         'Prithvi_EO_V2_300M',
+        'prithvi_eo_v2_300m',
         'prithvi_eo_v2_b_300m',
-        'prithvi_eo_b_300m',
         'PrithviEO_V2_300M',
+        'prithvi_eo_b_300m',
     ]
 
     def _list_registered_backbones():
-        """Print all backbone keys containing 'prithvi' for debugging."""
+        """Print all Prithvi-related keys visible to timm + terratorch registries."""
         try:
-            from terratorch.models.backbones import BACKBONE_REGISTRY
-            keys = [k for k in BACKBONE_REGISTRY.registry.keys()
+            import timm
+            keys = [k for k in timm.list_models() if 'prithvi' in k.lower()]
+            print(f'[model] timm registered Prithvi models: {keys}')
+        except Exception:
+            pass
+        try:
+            from terratorch.registry import TERRATORCH_BACKBONE_REGISTRY
+            keys = [k for k in TERRATORCH_BACKBONE_REGISTRY.registry
                     if 'prithvi' in k.lower()]
-            print(f'[model] Registered Prithvi backbones: {keys}')
+            print(f'[model] TerraTorch registered Prithvi backbones: {keys}')
         except Exception as e:
-            print(f'[model] Could not list backbone registry: {e}')
+            print(f'[model] Could not query TerraTorch backbone registry: {e}')
 
-    factory = PrithviModelFactory()
+    factory = EncoderDecoderFactory()
     terratorch_model = None
-    used_name = None
 
     for backbone_name in _BACKBONE_CANDIDATES:
         try:
@@ -210,8 +217,7 @@ def load_model(
                     'channels': 256,
                 },
             )
-            used_name = backbone_name
-            print(f'[model] Backbone loaded: {backbone_name}')
+            print(f'[model] Backbone loaded via EncoderDecoderFactory: {backbone_name}')
             break
         except Exception as e:
             print(f'[model] "{backbone_name}" failed: {e}')
@@ -220,8 +226,8 @@ def load_model(
         _list_registered_backbones()
         raise RuntimeError(
             'Could not instantiate any Prithvi-EO-2.0-300M backbone variant.\n'
-            'See "[model] Registered Prithvi backbones" above for the correct name.\n'
-            'Update _BACKBONE_CANDIDATES in train/model.py with the listed key.'
+            'See registered keys printed above and add the correct name as the\n'
+            'first entry in _BACKBONE_CANDIDATES in train/model.py.'
         )
 
     # ── freeze backbone / encoder ─────────────────────────────────────────────
