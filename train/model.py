@@ -83,10 +83,7 @@ class PrithviSegWrapper(nn.Module):
         # TerraTorch's Prithvi segmentation models return a ModelOutput or Tensor.
         # The API accepts pixel_values=(B,T,C,H,W) and temporal_coords=(B,T).
         # Adjust here if the installed TerraTorch version uses different arg names.
-        out = self.model(
-            pixel_values=spectral,
-            temporal_coords=temporal_coords,
-        )
+        out = self.model(spectral, temporal_coords=temporal_coords)
         # ModelOutput → extract the segmentation logits tensor
         if hasattr(out, 'output'):
             return out.output
