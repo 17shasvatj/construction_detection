@@ -3,18 +3,18 @@ Model loading for Prithvi-EO-2.0-300M fine-tuning via TerraTorch.
 
 Two paths selected by the smoke_test flag:
   - smoke_test=True : returns _SmokeStub (tiny Conv2d) — no TerraTorch required.
-                      Exercises the full pipeline on CPU locally.
   - smoke_test=False: loads real Prithvi-EO-2.0-300M via TerraTorch with frozen
                       backbone + UPerNet segmentation head. Requires TerraTorch.
-                      Install on GPU VM: pip install terratorch
 
-There is NO silent fallback. If TerraTorch is missing on a non-smoke-test run,
-this module raises a clear ImportError with install instructions.
+Fixed K=6 window means Prithvi always receives (B, 6, K, H, W) — no variable-length
+patching, no monkey-patching of prepare_features_for_image_model.
 """
 
 import torch
 import torch.nn as nn
 from typing import Optional
+
+from train.dataset import K   # K=6, the fixed causal window length
 
 
 # ── smoke-test stub ────────────────────────────────────────────────────────────
@@ -22,33 +22,22 @@ from typing import Optional
 class _SmokeStub(nn.Module):
     """
     Minimal Conv2d stand-in for --smoke-test runs.
-
-    Accepts the same (spectral, temporal_coords) interface as the Prithvi wrapper
-    so the full training/eval pipeline can be exercised on CPU without TerraTorch.
-
-    NOT a fallback for real training — use only with --smoke-test.
+    Same (spectral, temporal_coords) → logits interface as PrithviSegWrapper.
+    NOT a fallback for real training.
     """
 
     def __init__(self, in_channels: int, num_frames: int, num_classes: int):
         super().__init__()
-        # Flatten temporal dimension into channels
         self.conv = nn.Conv2d(in_channels * num_frames, num_classes, kernel_size=1)
         self._num_frames = num_frames
-        self._num_classes = num_classes
 
     def forward(
         self,
-        spectral: torch.Tensor,                    # (B, T, C, H, W)
+        spectral: torch.Tensor,
         temporal_coords: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         B, T, C, H, W = spectral.shape
-        # Pad or truncate to num_frames if needed (variable T per batch)
-        if T < self._num_frames:
-            pad = spectral.new_zeros(B, self._num_frames - T, C, H, W)
-            spectral = torch.cat([spectral, pad], dim=1)
-        elif T > self._num_frames:
-            spectral = spectral[:, :self._num_frames]
-        return self.conv(spectral.reshape(B, self._num_frames * C, H, W))
+        return self.conv(spectral.reshape(B, T * C, H, W))
 
     def frozen_encoder_params(self):
         return []
@@ -63,11 +52,8 @@ class PrithviSegWrapper(nn.Module):
     """
     Thin wrapper around TerraTorch's Prithvi-EO-2.0 segmentation model.
 
-    Provides a consistent (spectral, temporal_coords) → logits interface
-    regardless of the internal TerraTorch API shape expectations.
-
-    spectral:        (B, T, 6, H, W)  float32, normalized
-    temporal_coords: (B, T)           float32, normalized DOY in [0,1]
+    spectral:        (B, K, 6, H, W)  float32, normalized — fixed K frames
+    temporal_coords: (B, K)           float32, normalized DOY in [0, 1]
     returns:         (B, num_classes, H, W)  float32 logits
     """
 
@@ -76,18 +62,10 @@ class PrithviSegWrapper(nn.Module):
         self.model = terratorch_model
         self._debug_printed = False
 
-    def _find_backbone(self) -> Optional[torch.nn.Module]:
-        """Locate the Prithvi backbone inside the TerraTorch model."""
-        for attr in ('backbone', 'encoder', 'model'):
-            obj = getattr(self.model, attr, None)
-            if obj is not None and hasattr(obj, 'num_frames'):
-                return obj
-        return None
-
     def forward(
-            self,
-            spectral: torch.Tensor,
-            temporal_coords: Optional[torch.Tensor] = None,
+        self,
+        spectral: torch.Tensor,
+        temporal_coords: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         B, T, C, H, W = spectral.shape
 
@@ -95,17 +73,8 @@ class PrithviSegWrapper(nn.Module):
             print(f'[model] Input shape to model: (B={B}, T={T}, C={C}, H={H}, W={W})')
             self._debug_printed = True
 
-        # Prithvi's Conv3d patch_embed expects (B, C, T, H, W)
+        # Prithvi's Conv3d patch_embed expects (B, C, T, H, W).
         spectral = spectral.permute(0, 2, 1, 3, 4).contiguous()
-
-        # Update the backbone's stored input dimensions to match this batch's
-        # actual shape. prepare_features_for_image_model reads
-        # patch_embed.input_size[0] to compute the temporal reshape dim —
-        # if it's stale (init-time num_frames_max), the reshape breaks for
-        # variable-length batches.
-        backbone = self._find_backbone()
-        if backbone is not None:
-            backbone.patch_embed.input_size = (T, H, W)
 
         out = self.model(spectral, temporal_coords=temporal_coords)
 
@@ -116,20 +85,18 @@ class PrithviSegWrapper(nn.Module):
         return out
 
     def frozen_encoder_params(self):
-        """Parameters belonging to the frozen backbone (for logging)."""
         return [p for n, p in self.model.named_parameters()
                 if any(kw in n for kw in ('backbone', 'encoder', 'patch_embed', 'blocks'))
                 and not p.requires_grad]
 
     def head_params(self):
-        """Trainable parameters (head only, since backbone is frozen)."""
         return [p for p in self.model.parameters() if p.requires_grad]
 
 
 # ── factory ────────────────────────────────────────────────────────────────────
 
 def load_model(
-    num_frames_max: int,
+    num_frames_max: int = K,
     num_classes: int = 3,
     device: str = 'cpu',
     smoke_test: bool = False,
@@ -139,16 +106,12 @@ def load_model(
     Load and return the segmentation model.
 
     Args:
-        num_frames_max: Maximum number of temporal frames across all AOIs.
-                        Used to size the stub (smoke_test=True) or passed to
-                        Prithvi's num_frames parameter (smoke_test=False).
-        num_classes:    Number of output classes (3: baseline/grading/built).
+        num_frames_max: Temporal window depth. For production use K=6 (the fixed
+                        window constant). Used to size the stub or configure Prithvi.
+        num_classes:    Output classes (3: baseline / grading / built).
         device:         'cpu' or 'cuda'.
-        smoke_test:     If True, return _SmokeStub (no TerraTorch needed).
-
-    Returns:
-        nn.Module with .forward(spectral, temporal_coords) → (B, C, H, W) logits.
-        Also exposes .head_params() for the optimizer.
+        smoke_test:     Return _SmokeStub; no TerraTorch needed.
+        patch_size:     Spatial patch size in pixels (128 → 8×8 ViT grid with patch=16).
     """
     if smoke_test:
         print('[model] --smoke-test: using _SmokeStub (Conv2d placeholder, no TerraTorch).')
@@ -160,95 +123,90 @@ def load_model(
         from terratorch.models import EncoderDecoderFactory
     except ImportError:
         raise ImportError(
-            '\n'
-            'TerraTorch is required for real training (not smoke-test).\n'
-            '\n'
+            '\nTerraTorch is required for real training.\n'
             'Install on the GPU VM:\n'
             '    pip install terratorch\n'
-            '\n'
-            'See train/requirements.txt for pinned versions.\n'
             'For local CPU smoke-testing, pass --smoke-test to train.py / evaluate.py.\n'
         )
 
-    print(f'[model] Loading Prithvi-EO-2.0-300M via TerraTorch (num_classes={num_classes})...')
-    # Prithvi-EO-2.0 self-describes its bands and temporal handling —
-    # do NOT pass in_channels, num_frames, or bands to build_model.
+    # Optional: HLSBands enum for explicit band specification
+    try:
+        from terratorch.datasets.utils import HLSBands
+        _BANDS = [
+            HLSBands.BLUE, HLSBands.GREEN, HLSBands.RED,
+            HLSBands.NIR_NARROW, HLSBands.SWIR_1, HLSBands.SWIR_2,
+        ]
+    except (ImportError, AttributeError):
+        _BANDS = None
+        print('[model] HLSBands not found; omitting backbone_bands from build call.')
+
+    print(f'[model] Loading Prithvi-EO-2.0-300M via TerraTorch '
+          f'(num_frames={num_frames_max}, patch_size={patch_size}, num_classes={num_classes})...')
 
     # ── force-import backbone modules to trigger @register decorators ─────────
-    # TerraTorch registers models lazily — the module must be imported before
-    # the factory can find the backbone name.  Try every known module path.
-    _backbone_module = None
+    import importlib
     for _mod in [
         'terratorch.models.backbones.prithvi_eo_v2',
         'terratorch.models.backbones.prithvi_model',
         'terratorch.models.backbones.prithvi',
     ]:
         try:
-            import importlib
-            _backbone_module = importlib.import_module(_mod)
+            importlib.import_module(_mod)
             print(f'[model] Imported backbone module: {_mod}')
             break
         except ImportError:
             pass
 
-    # ── list everything in the registry for debugging ─────────────────────────
+    # ── registry listing (only on failure) ───────────────────────────────────
     def _list_registered_backbones():
-        # TerraTorch registry
         for reg_path in [
             ('terratorch.registry', 'TERRATORCH_BACKBONE_REGISTRY'),
             ('terratorch.registry', 'MODEL_REGISTRY'),
         ]:
             try:
-                mod  = importlib.import_module(reg_path[0])
-                reg  = getattr(mod, reg_path[1])
-                # Registry objects may expose keys via __iter__, keys(), or _registry
+                mod = importlib.import_module(reg_path[0])
+                reg = getattr(mod, reg_path[1])
                 for getter in [lambda r: list(r), lambda r: list(r.keys()),
                                lambda r: list(r._registry.keys())]:
                     try:
-                        all_keys = getter(reg)
-                        prithvi  = [k for k in all_keys if 'prithvi' in str(k).lower()]
+                        keys = getter(reg)
+                        prithvi = [k for k in keys if 'prithvi' in str(k).lower()]
                         print(f'[model] {reg_path[1]} Prithvi entries: {prithvi}')
-                        print(f'[model] {reg_path[1]} ALL entries (first 40): {all_keys[:40]}')
                         break
                     except Exception:
                         continue
             except Exception:
                 pass
-        # Also list anything the backbone module exports
-        if _backbone_module is not None:
-            fns = [k for k in dir(_backbone_module)
-                   if not k.startswith('_') and 'prithvi' in k.lower()]
-            print(f'[model] Backbone module public names: {fns}')
 
-    # ── try factory with candidate backbone names ─────────────────────────────
+    # ── build model with documented flat TerraTorch kwargs ───────────────────
     _BACKBONE_CANDIDATES = [
         'prithvi_eo_v2_300',
         'prithvi_eo_v2_300m',
         'Prithvi_EO_V2_300M',
     ]
 
-    factory = EncoderDecoderFactory()
+    factory          = EncoderDecoderFactory()
     terratorch_model = None
 
     for backbone_name in _BACKBONE_CANDIDATES:
         try:
-            terratorch_model = factory.build_model(
+            build_kwargs = dict(
                 task='segmentation',
                 backbone=backbone_name,
+                backbone_pretrained=True,
+                backbone_num_frames=num_frames_max,
                 decoder='UperNetDecoder',
+                decoder_channels=256,
                 num_classes=num_classes,
-                backbone_kwargs={
-                    'pretrained': True,
-                    'num_frames': num_frames_max,
-                    'img_size': patch_size,
-                    'temporal_coords': True,
-                    'location_coords': False,
-                },
-                decoder_kwargs={
-                    'channels': 256,
-                },
+                necks=[
+                    {'name': 'SelectIndices', 'indices': [-1]},
+                    {'name': 'ReshapeTokensToImage'},
+                ],
             )
-            print(f'[model] Backbone loaded via EncoderDecoderFactory: {backbone_name}')
+            if _BANDS is not None:
+                build_kwargs['backbone_bands'] = _BANDS
+            terratorch_model = factory.build_model(**build_kwargs)
+            print(f'[model] Backbone loaded: {backbone_name}')
             break
         except Exception as e:
             print(f'[model] "{backbone_name}" failed: {e}')
@@ -257,40 +215,9 @@ def load_model(
         _list_registered_backbones()
         raise RuntimeError(
             'Could not instantiate any Prithvi-EO-2.0-300M backbone.\n'
-            'Check the "[model] Backbone module public names" and registry output above\n'
-            'and add the correct name as the first entry in _BACKBONE_CANDIDATES in\n'
-            'train/model.py.'
+            'Check the Prithvi entries printed above and update _BACKBONE_CANDIDATES '
+            'in train/model.py.'
         )
-
-    # ── post-init backbone patch ──────────────────────────────────────────────
-    # backbone_kwargs may not propagate img_size / num_frames to all TerraTorch
-    # versions. Patch attributes directly so prepare_features_for_image_model
-    # uses the correct spatial grid. num_frames is also overridden per-batch in
-    # PrithviSegWrapper.forward; this sets a sane default.
-    _backbone_obj = None
-    for _attr in ('backbone', 'encoder'):
-        _candidate = getattr(terratorch_model, _attr, None)
-        if _candidate is not None and hasattr(_candidate, 'num_frames'):
-            _backbone_obj = _candidate
-            break
-
-    if _backbone_obj is not None:
-        _ph = patch_size // 16   # Prithvi patch size = 16
-        _old_nf = getattr(_backbone_obj, 'num_frames', '?')
-        _old_is = getattr(_backbone_obj, 'img_size', '?')
-        _old_pg = getattr(_backbone_obj, 'patch_grid_size', '?')
-        if hasattr(_backbone_obj, 'num_frames'):
-            _backbone_obj.num_frames = num_frames_max
-        if hasattr(_backbone_obj, 'img_size'):
-            _backbone_obj.img_size = patch_size
-        if hasattr(_backbone_obj, 'patch_grid_size'):
-            _backbone_obj.patch_grid_size = (_ph, _ph)
-        print(f'[model] Backbone patched: '
-              f'num_frames {_old_nf}→{num_frames_max}, '
-              f'img_size {_old_is}→{patch_size}, '
-              f'patch_grid_size {_old_pg}→({_ph},{_ph})')
-    else:
-        print('[model] WARNING: could not locate backbone to patch num_frames/img_size/patch_grid_size.')
 
     # ── freeze backbone / encoder ─────────────────────────────────────────────
     frozen_count = 0
@@ -302,7 +229,7 @@ def load_model(
     trainable = sum(p.numel() for p in terratorch_model.parameters() if p.requires_grad)
     total     = sum(p.numel() for p in terratorch_model.parameters())
     print(f'[model] Frozen {frozen_count} param tensors. '
-          f'Trainable: {trainable:,} / {total:,} params ({100*trainable/total:.1f}%).')
+          f'Trainable: {trainable:,} / {total:,} ({100*trainable/total:.1f}%).')
 
     model = PrithviSegWrapper(terratorch_model)
     return model.to(torch.device(device))

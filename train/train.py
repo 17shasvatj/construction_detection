@@ -37,10 +37,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from train.dataset import (
     ConstructionDataset,
-    BucketSampler,
     construction_collate_fn,
     compute_norm_stats,
     IGNORE_LABEL,
+    K,
 )
 from train.model import load_model
 
@@ -154,9 +154,9 @@ def train_epoch(
     total_loss = 0.0
     n_batches  = 0
 
-    for spectral, dates, target, _n_frames in loader:
-        spectral = spectral.to(device)   # (B, T, 6, P, P)
-        dates    = dates.to(device)       # (B, T)
+    for spectral, dates, target in loader:
+        spectral = spectral.to(device)   # (B, K, 6, P, P)
+        dates    = dates.to(device)       # (B, K)
         target   = target.to(device)      # (B, P, P)
 
         optimizer.zero_grad()
@@ -184,7 +184,7 @@ def eval_epoch(
     all_preds   = []
     all_labels  = []
 
-    for spectral, dates, target, _n_frames in loader:
+    for spectral, dates, target in loader:
         spectral = spectral.to(device)
         dates    = dates.to(device)
         target   = target.to(device)
@@ -276,22 +276,20 @@ def main():
     )
 
     # ── loaders ────────────────────────────────────────────────────────────────
-    train_sampler = BucketSampler(
-        train_ds, batch_size=args.batch_size, shuffle=True, seed=args.seed
-    )
-    val_sampler = BucketSampler(
-        val_ds, batch_size=args.batch_size, shuffle=False, seed=args.seed
-    )
+    # Fixed K means all examples have the same shape — no bucketing needed.
     train_loader = DataLoader(
         train_ds,
-        batch_sampler=train_sampler,
+        batch_size=args.batch_size,
+        shuffle=True,
         collate_fn=construction_collate_fn,
         num_workers=0,    # mmap + fork can deadlock; set >0 only if you verify
         pin_memory=(args.device != 'cpu'),
+        drop_last=True,
     )
     val_loader = DataLoader(
         val_ds,
-        batch_sampler=val_sampler,
+        batch_size=args.batch_size,
+        shuffle=False,
         collate_fn=construction_collate_fn,
         num_workers=0,
         pin_memory=(args.device != 'cpu'),
@@ -301,14 +299,9 @@ def main():
     class_weights = compute_class_weights(TRAIN_AOIS, args.data_root, device=device)
 
     # ── model ──────────────────────────────────────────────────────────────────
-    # num_frames_max tells the backbone its fixed temporal depth at init time.
-    # BucketSampler ensures every batch has a uniform t; PrithviSegWrapper.forward
-    # updates backbone.num_frames dynamically per batch so the reshape is correct.
-    num_frames_max = max(train_ds.max_t, val_ds.max_t)
-    print(f'\n[train] num_frames_max={num_frames_max}')
-
+    print(f'\n[train] Fixed causal window K={K}')
     model = load_model(
-        num_frames_max=num_frames_max,
+        num_frames_max=K,
         num_classes=NUM_CLASSES,
         device=args.device,
         smoke_test=args.smoke_test,
@@ -336,7 +329,7 @@ def main():
         'data_root':      args.data_root,
         'norm_stats_path': norm_stats_path,
         'class_weights':  class_weights.tolist(),
-        'num_frames_max': num_frames_max,
+        'num_frames_max': K,
         'n_train_examples': len(train_ds),
         'n_val_examples':   len(val_ds),
         'val_selection_note': (
@@ -358,7 +351,6 @@ def main():
 
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
-        train_sampler.set_epoch(epoch)
 
         train_loss            = train_epoch(train_loader, model, optimizer, criterion, device)
         val_loss, val_metrics = eval_epoch(val_loader,   model, criterion, device)

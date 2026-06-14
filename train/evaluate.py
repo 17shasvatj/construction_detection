@@ -34,6 +34,7 @@ from train.dataset import (
     PATCH_SIZE,
     EVAL_STRIDE,
     T_MIN,
+    K,
 )
 from train.model import load_model
 from train.train import compute_per_class_metrics, print_metrics, set_seed
@@ -82,7 +83,7 @@ def _class_to_rgb(arr: np.ndarray) -> np.ndarray:
 def tile_inference_at_t(
     model: torch.nn.Module,
     spectral_cube: np.ndarray,    # (T, 6, H, W) float
-    nan_flag: np.ndarray,         # (T, H, W) bool
+    nan_flag: np.ndarray,         # (T, H, W) bool  (unused here but kept for API compat)
     dates: np.ndarray,            # (T,) float32
     t: int,
     norm_stats: Dict,
@@ -91,14 +92,19 @@ def tile_inference_at_t(
     stride: int = EVAL_STRIDE,
 ) -> np.ndarray:
     """
-    Tile inference for a single target timepoint t.
-    Input: valid frames 0..t-1 (after NaN drop). Returns (H, W) predicted class map.
+    Tile inference for a single target timepoint t using the fixed K-frame window.
+    Input: spectral[t-K:t] (K consecutive frames, all causally valid).
+    NaN pixels are filled with band mean; the window length stays fixed at K.
+    Skips patches where t < K. Returns (H, W) predicted class map.
     Overlapping logits are averaged before argmax.
     """
     T, C, H, W = spectral_cube.shape
     assert t < T, f'Target t={t} out of range for T={T}'
 
-    mean       = np.array(norm_stats['mean'], dtype=np.float32)   # (6,)
+    if t < K:
+        return np.full((H, W), IGNORE_LABEL, dtype=np.uint8)
+
+    mean       = np.array(norm_stats['mean'], dtype=np.float32)
     std        = np.array(norm_stats['std'],  dtype=np.float32)
     std        = np.where(std < 1e-8, 1.0, std)
     data_scale = float(norm_stats.get('data_scale', 1.0))
@@ -111,17 +117,10 @@ def tile_inference_at_t(
     for (r, c) in positions:
         P = patch_size
 
-        # Valid input frames: indices 0..t-1 with ≤50% NaN pixels
-        nan_patch = nan_flag[:t, r:r+P, c:c+P]
-        nan_frac  = nan_patch.mean(axis=(1, 2))
-        valid_idxs = np.array([i for i, f in enumerate(nan_frac) if f <= 0.5])
+        # Fixed K-frame causal window: spectral[t-K:t]
+        spectral = spectral_cube[t-K:t, :, r:r+P, c:c+P].astype(np.float32)  # (K,6,P,P)
 
-        if len(valid_idxs) < T_MIN:
-            continue
-
-        spectral = spectral_cube[valid_idxs, :, r:r+P, c:c+P].astype(np.float32)
-
-        # Scale to Prithvi's expected range, then normalize
+        # Scale then fill NaN pixels with band mean, then standardize.
         if data_scale != 1.0:
             spectral = spectral * data_scale
         for b in range(6):
@@ -129,14 +128,10 @@ def tile_inference_at_t(
             spectral[:, b, :, :] = np.where(np.isnan(band), mean[b], band)
         spectral = (spectral - mean[None, :, None, None]) / std[None, :, None, None]
 
-        date_patch = dates[valid_idxs]
+        date_patch = dates[t-K:t]   # (K,)
 
-        s_t = torch.from_numpy(spectral)    # (T_in, 6, P, P)
-        d_t = torch.from_numpy(date_patch)  # (T_in,)
-        # No padding: each tile call has a single patch (B=1) with its own t.
-        # PrithviSegWrapper.forward updates backbone.num_frames to match actual t.
-        s_t = s_t.unsqueeze(0).to(device)   # (1, T_in, 6, P, P)
-        d_t = d_t.unsqueeze(0).to(device)   # (1, T_in)
+        s_t = torch.from_numpy(spectral).unsqueeze(0).to(device)    # (1, K, 6, P, P)
+        d_t = torch.from_numpy(date_patch).unsqueeze(0).to(device)  # (1, K)
 
         with torch.no_grad():
             logits = model(s_t, temporal_coords=d_t)   # (1, C, P, P)
@@ -145,10 +140,9 @@ def tile_inference_at_t(
         logit_sum[:, r:r+P, c:c+P] += logits_np
         count_map[r:r+P, c:c+P]    += 1
 
-    # Average logits and argmax
     valid = count_map > 0
     pred  = np.full((H, W), IGNORE_LABEL, dtype=np.uint8)
-    avg   = logit_sum[:, valid] / count_map[valid][None, :]   # (C, n_valid)
+    avg   = logit_sum[:, valid] / count_map[valid][None, :]
     pred[valid] = avg.argmax(axis=0).astype(np.uint8)
 
     return pred
@@ -737,12 +731,9 @@ def main():
     print(f'[eval] Using norm stats from {norm_stats_path}')
 
     # ── rebuild model ──────────────────────────────────────────────────────────
-    config         = ckpt.get('config', {})
-    num_frames_max = config.get('num_frames_max', 21)
-    smoke_test     = args.smoke_test
-
+    smoke_test = args.smoke_test
     model = load_model(
-        num_frames_max=num_frames_max,
+        num_frames_max=K,
         num_classes=NUM_CLASSES,
         device=args.device,
         smoke_test=smoke_test,
