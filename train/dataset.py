@@ -435,7 +435,7 @@ class BucketSampler(Sampler):
         seed: int = 42,
         drop_last: bool = False,
     ):
-        super().__init__(dataset)
+        super().__init__()
         self.batch_size = batch_size
         self.shuffle    = shuffle
         self.seed       = seed
