@@ -313,7 +313,7 @@ def main():
     # ── optimizer + loss ───────────────────────────────────────────────────────
     head_params = model.head_params() if hasattr(model, 'head_params') else list(model.parameters())
     optimizer   = AdamW(head_params, lr=args.lr, weight_decay=1e-4)
-    scheduler   = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5, verbose=True)
+    scheduler   = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
     criterion   = nn.CrossEntropyLoss(weight=class_weights, ignore_index=IGNORE_LABEL)
 
     # ── run config ─────────────────────────────────────────────────────────────
