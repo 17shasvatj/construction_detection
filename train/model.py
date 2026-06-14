@@ -166,26 +166,63 @@ def load_model(
         bands = ['BLUE', 'GREEN', 'RED', 'NIR_NARROW', 'SWIR_1', 'SWIR_2']
         print('[model] Band identifiers: plain strings (HLSBands enum unavailable)')
 
-    # ── TerraTorch model construction ─────────────────────────────────────────
-    # If the TerraTorch API changes between versions, adjust only this block.
+    # ── resolve backbone name ─────────────────────────────────────────────────
+    # TerraTorch registers Prithvi-EO-2.0 under a versioned name; try candidates
+    # in likely order and fall back to printing the registry so we know the exact key.
+    _BACKBONE_CANDIDATES = [
+        'prithvi_eo_v2_300m',
+        'Prithvi_EO_V2_300M',
+        'prithvi_eo_v2_b_300m',
+        'prithvi_eo_b_300m',
+        'PrithviEO_V2_300M',
+    ]
+
+    def _list_registered_backbones():
+        """Print all backbone keys containing 'prithvi' for debugging."""
+        try:
+            from terratorch.models.backbones import BACKBONE_REGISTRY
+            keys = [k for k in BACKBONE_REGISTRY.registry.keys()
+                    if 'prithvi' in k.lower()]
+            print(f'[model] Registered Prithvi backbones: {keys}')
+        except Exception as e:
+            print(f'[model] Could not list backbone registry: {e}')
+
     factory = PrithviModelFactory()
-    terratorch_model = factory.build_model(
-        task='segmentation',
-        backbone='prithvi_eo_b_300m',
-        decoder='UperNetDecoder',
-        in_channels=6,
-        num_frames=num_frames_max,
-        num_classes=num_classes,
-        pretrained=True,
-        bands=bands,
-        backbone_kwargs={
-            'temporal_coords': True,
-            'location_coords': False,
-        },
-        decoder_kwargs={
-            'channels': 256,
-        },
-    )
+    terratorch_model = None
+    used_name = None
+
+    for backbone_name in _BACKBONE_CANDIDATES:
+        try:
+            terratorch_model = factory.build_model(
+                task='segmentation',
+                backbone=backbone_name,
+                decoder='UperNetDecoder',
+                in_channels=6,
+                num_frames=num_frames_max,
+                num_classes=num_classes,
+                pretrained=True,
+                bands=bands,
+                backbone_kwargs={
+                    'temporal_coords': True,
+                    'location_coords': False,
+                },
+                decoder_kwargs={
+                    'channels': 256,
+                },
+            )
+            used_name = backbone_name
+            print(f'[model] Backbone loaded: {backbone_name}')
+            break
+        except Exception as e:
+            print(f'[model] "{backbone_name}" failed: {e}')
+
+    if terratorch_model is None:
+        _list_registered_backbones()
+        raise RuntimeError(
+            'Could not instantiate any Prithvi-EO-2.0-300M backbone variant.\n'
+            'See "[model] Registered Prithvi backbones" above for the correct name.\n'
+            'Update _BACKBONE_CANDIDATES in train/model.py with the listed key.'
+        )
 
     # ── freeze backbone / encoder ─────────────────────────────────────────────
     frozen_count = 0
