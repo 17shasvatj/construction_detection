@@ -148,23 +148,9 @@ def load_model(
             'For local CPU smoke-testing, pass --smoke-test to train.py / evaluate.py.\n'
         )
 
-    print(f'[model] Loading Prithvi-EO-2.0-300M via TerraTorch '
-          f'(num_frames_max={num_frames_max}, num_classes={num_classes})...')
-
-    # ── resolve HLS band identifiers ─────────────────────────────────────────
-    # Bands B02,B03,B04,B08,B11,B12 → Prithvi HLS vocabulary:
-    #   Blue, Green, Red, NIR_NARROW, SWIR_1, SWIR_2
-    # Try the HLSBands enum (preferred); fall back to plain strings.
-    try:
-        from terratorch.datasets import HLSBands
-        bands = [
-            HLSBands.BLUE, HLSBands.GREEN, HLSBands.RED,
-            HLSBands.NIR_NARROW, HLSBands.SWIR_1, HLSBands.SWIR_2,
-        ]
-        print('[model] Band identifiers: HLSBands enum')
-    except Exception:
-        bands = ['BLUE', 'GREEN', 'RED', 'NIR_NARROW', 'SWIR_1', 'SWIR_2']
-        print('[model] Band identifiers: plain strings (HLSBands enum unavailable)')
+    print(f'[model] Loading Prithvi-EO-2.0-300M via TerraTorch (num_classes={num_classes})...')
+    # Prithvi-EO-2.0 self-describes its bands and temporal handling —
+    # do NOT pass in_channels, num_frames, or bands to build_model.
 
     # ── force-import backbone modules to trigger @register decorators ─────────
     # TerraTorch registers models lazily — the module must be imported before
@@ -228,11 +214,8 @@ def load_model(
                 task='segmentation',
                 backbone=backbone_name,
                 decoder='UperNetDecoder',
-                in_channels=6,
-                num_frames=num_frames_max,
                 num_classes=num_classes,
                 pretrained=True,
-                bands=bands,
                 backbone_kwargs={
                     'temporal_coords': True,
                     'location_coords': False,
