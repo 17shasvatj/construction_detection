@@ -200,7 +200,7 @@ def load_model(
                 num_classes=num_classes,
                 necks=[
                     {'name': 'SelectIndices', 'indices': [-1]},
-                    {'name': 'ReshapeTokensToImage'},
+                    {'name': 'ReshapeTokensToImage', 'remove_cls_token': True},
                 ],
             )
             if _BANDS is not None:
