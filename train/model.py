@@ -85,50 +85,30 @@ class PrithviSegWrapper(nn.Module):
         return None
 
     def forward(
-        self,
-        spectral: torch.Tensor,
-        temporal_coords: Optional[torch.Tensor] = None,
+            self,
+            spectral: torch.Tensor,
+            temporal_coords: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         B, T, C, H, W = spectral.shape
 
-        # On the first forward, dump backbone internals so we can verify attributes.
         if not self._debug_printed:
             print(f'[model] Input shape to model: (B={B}, T={T}, C={C}, H={H}, W={W})')
-            _bb = self._find_backbone()
-            if _bb is not None:
-                print(f'[model] backbone type: {type(_bb).__name__}')
-                for _a in ('num_frames', 'img_size', 'patch_size', 'patch_grid_size'):
-                    print(f'[model] backbone.{_a}: {getattr(_bb, _a, "MISSING")}')
-            else:
-                print('[model] WARNING: _find_backbone() returned None')
-                # Try one level deeper in case the backbone is nested
-                for _path in ('encoder.backbone', 'encoder.encoder', 'backbone.backbone'):
-                    _obj = self.model
-                    for _attr in _path.split('.'):
-                        _obj = getattr(_obj, _attr, None)
-                        if _obj is None:
-                            break
-                    if _obj is not None and hasattr(_obj, 'num_frames'):
-                        print(f'[model] Found backbone at self.model.{_path}: {type(_obj).__name__}')
-                        print(f'[model]   num_frames={_obj.num_frames}, '
-                              f'img_size={getattr(_obj, "img_size", "?")}')
             self._debug_printed = True
 
-        # Prithvi's Conv3d patch_embed expects (B, C, T, H, W); our data is (B, T, C, H, W).
+        # Prithvi's Conv3d patch_embed expects (B, C, T, H, W)
         spectral = spectral.permute(0, 2, 1, 3, 4).contiguous()
 
-        # Dynamically update the backbone's temporal and spatial metadata so
-        # prepare_features_for_image_model reshapes correctly for this batch.
-        # BucketSampler guarantees every example in the batch has the same T.
+        # Update the backbone's stored input dimensions to match this batch's
+        # actual shape. prepare_features_for_image_model reads
+        # patch_embed.input_size[0] to compute the temporal reshape dim —
+        # if it's stale (init-time num_frames_max), the reshape breaks for
+        # variable-length batches.
         backbone = self._find_backbone()
         if backbone is not None:
-            if hasattr(backbone, 'num_frames'):
-                backbone.num_frames = T
-            if hasattr(backbone, 'img_size'):
-                backbone.img_size = H   # actual spatial size (should be 128)
+            backbone.patch_embed.input_size = (T, H, W)
 
         out = self.model(spectral, temporal_coords=temporal_coords)
-        # ModelOutput → extract the segmentation logits tensor
+
         if hasattr(out, 'output'):
             return out.output
         if isinstance(out, (list, tuple)):
