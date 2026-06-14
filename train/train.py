@@ -48,7 +48,7 @@ from train.model import load_model
 # ── AOI roles ──────────────────────────────────────────────────────────────────
 TRAIN_AOIS   = ['babcock', 'sunterra']
 VAL_AOIS     = ['wendell']   # TEST-REGION SELECTION — see module docstring
-DATA_ROOT    = 'data'
+DATA_ROOT    = '../data'
 OUTPUT_DIR   = 'outputs'
 CKPT_DIR     = 'checkpoints'
 
