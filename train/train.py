@@ -303,11 +303,18 @@ def main():
     # ── model ──────────────────────────────────────────────────────────────────
     num_frames_max = max(train_ds.max_t, val_ds.max_t)
     print(f'\n[train] num_frames_max={num_frames_max}')
+
+    # Rebuild datasets with num_frames_max so __getitem__ pads to fixed length.
+    # Must happen AFTER num_frames_max is known but before loaders are used.
+    train_ds.num_frames_max = num_frames_max
+    val_ds.num_frames_max   = num_frames_max
+
     model = load_model(
         num_frames_max=num_frames_max,
         num_classes=NUM_CLASSES,
         device=args.device,
         smoke_test=args.smoke_test,
+        patch_size=128,
     )
 
     # ── optimizer + loss ───────────────────────────────────────────────────────

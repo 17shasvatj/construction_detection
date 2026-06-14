@@ -89,6 +89,7 @@ def tile_inference_at_t(
     device: torch.device,
     patch_size: int = PATCH_SIZE,
     stride: int = EVAL_STRIDE,
+    num_frames_max: Optional[int] = None,
 ) -> np.ndarray:
     """
     Tile inference for a single target timepoint t.
@@ -131,8 +132,16 @@ def tile_inference_at_t(
 
         date_patch = dates[valid_idxs]
 
-        s_t = torch.from_numpy(spectral).unsqueeze(0).to(device)    # (1, T_in, 6, P, P)
-        d_t = torch.from_numpy(date_patch).unsqueeze(0).to(device)  # (1, T_in)
+        s_t = torch.from_numpy(spectral)    # (T_in, 6, P, P)
+        d_t = torch.from_numpy(date_patch)  # (T_in,)
+        # Pad to num_frames_max to match model's fixed patch_embed input size
+        if num_frames_max is not None:
+            pad = num_frames_max - s_t.shape[0]
+            if pad > 0:
+                s_t = torch.cat([torch.zeros(pad, 6, P, P, dtype=s_t.dtype), s_t], dim=0)
+                d_t = torch.cat([torch.full((pad,), -1.0, dtype=d_t.dtype), d_t], dim=0)
+        s_t = s_t.unsqueeze(0).to(device)   # (1, num_frames_max, 6, P, P)
+        d_t = d_t.unsqueeze(0).to(device)   # (1, num_frames_max)
 
         with torch.no_grad():
             logits = model(s_t, temporal_coords=d_t)   # (1, C, P, P)
@@ -158,6 +167,7 @@ def run_tiled_inference(
     t_start: int = T_MIN,
     patch_size: int = PATCH_SIZE,
     stride: int = EVAL_STRIDE,
+    num_frames_max: Optional[int] = None,
 ) -> np.ndarray:
     """
     Run causal inference at every timepoint t ∈ [t_start .. T-1].
@@ -173,7 +183,8 @@ def run_tiled_inference(
     for t in range(t_start, T):
         print(f'[eval]   inference at t={t}/{T-1}...', end='\r', flush=True)
         pred_cube[t] = tile_inference_at_t(
-            model, spectral, nan_flag, dates, t, norm_stats, device, patch_size, stride
+            model, spectral, nan_flag, dates, t, norm_stats, device,
+            patch_size, stride, num_frames_max=num_frames_max,
         )
     print()
     return pred_cube
@@ -592,6 +603,7 @@ def run_failure_demo(
     device: torch.device,
     figures_dir: str,
     wendell_metrics: Optional[Dict] = None,
+    num_frames_max: Optional[int] = None,
 ) -> Optional[Dict]:
     """
     Run inference on a failure-demo AOI (OOD climate/geography).
@@ -646,7 +658,8 @@ def run_failure_demo(
     dates    = data['dates']
 
     pred = tile_inference_at_t(
-        model, spectral, nan_flag, dates, t_demo, norm_stats, device
+        model, spectral, nan_flag, dates, t_demo, norm_stats, device,
+        num_frames_max=num_frames_max,
     )
     label = data['labels'][t_demo]
 
@@ -770,7 +783,8 @@ def main():
         # ── (a) tiled inference at every t ─────────────────────────────────
         print(f'[eval] Running causal inference at each t (T={T})...')
         pred_cube = run_tiled_inference(
-            model, data, norm_stats, device, t_start=T_MIN
+            model, data, norm_stats, device, t_start=T_MIN,
+            num_frames_max=num_frames_max,
         )
 
         # ── per-timepoint metrics ───────────────────────────────────────────
@@ -821,7 +835,8 @@ def main():
             print(f'\n[eval] ════ FAILURE DEMO: {aoi_name.upper()} ════')
             result = run_failure_demo(
                 aoi_name, args.data_root, model, norm_stats, device,
-                FIGURES_DIR, wendell_metrics=wendell_grading_metrics
+                FIGURES_DIR, wendell_metrics=wendell_grading_metrics,
+                num_frames_max=num_frames_max,
             )
             if result is not None:
                 print(f'[eval] {aoi_name} failure-demo metrics:')

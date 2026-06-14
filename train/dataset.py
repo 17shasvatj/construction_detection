@@ -278,6 +278,7 @@ class ConstructionDataset(Dataset):
         norm_stats: Optional[Dict] = None,
         seed: int = 42,
         smoke_test: bool = False,
+        num_frames_max: Optional[int] = None,
     ):
         assert split in ('train', 'val', 'eval')
         self.split      = split
@@ -287,7 +288,8 @@ class ConstructionDataset(Dataset):
         self.smoke_test = smoke_test
         # data_scale: multiply raw spectral values before applying norm stats.
         # Prithvi's HLS stats are in 0–10000; PC S2 composites are 0–1 → scale=10000.
-        self.data_scale = float(norm_stats.get('data_scale', 1.0)) if norm_stats else 1.0
+        self.data_scale     = float(norm_stats.get('data_scale', 1.0)) if norm_stats else 1.0
+        self.num_frames_max = num_frames_max   # if set, pad every example to this length
         stride = TRAIN_STRIDE if split == 'train' else EVAL_STRIDE
 
         rng = random.Random(seed)
@@ -485,6 +487,20 @@ class ConstructionDataset(Dataset):
 
         if self.split == 'train':
             spectral_t, target_t = _augment(spectral_t, target_t)
+
+        # Pad to num_frames_max so Prithvi's fixed-T patch_embed gets uniform input.
+        # Prepend zero frames (sentinel: normalized value ~−mean/std, distinct from data).
+        # Padded dates are set to −1.0 (out-of-range sentinel for temporal embedding).
+        if self.num_frames_max is not None:
+            n = spectral_t.shape[0]
+            pad = self.num_frames_max - n
+            if pad > 0:
+                spectral_t = torch.cat(
+                    [torch.zeros(pad, 6, P, P, dtype=spectral_t.dtype), spectral_t], dim=0
+                )
+                dates_t = torch.cat(
+                    [torch.full((pad,), -1.0, dtype=dates_t.dtype), dates_t], dim=0
+                )
 
         return spectral_t, dates_t, target_t, ex['n_frames']
 

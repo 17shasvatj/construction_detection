@@ -111,6 +111,7 @@ def load_model(
     num_classes: int = 3,
     device: str = 'cpu',
     smoke_test: bool = False,
+    patch_size: int = 128,
 ) -> nn.Module:
     """
     Load and return the segmentation model.
@@ -216,6 +217,8 @@ def load_model(
                 num_classes=num_classes,
                 backbone_kwargs={
                     'pretrained': True,
+                    'num_frames': num_frames_max,
+                    'img_size': patch_size,
                     'temporal_coords': True,
                     'location_coords': False,
                 },
