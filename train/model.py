@@ -215,8 +215,8 @@ def load_model(
                 backbone=backbone_name,
                 decoder='UperNetDecoder',
                 num_classes=num_classes,
-                pretrained=True,
                 backbone_kwargs={
+                    'pretrained': True,
                     'temporal_coords': True,
                     'location_coords': False,
                 },
