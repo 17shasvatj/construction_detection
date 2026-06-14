@@ -74,17 +74,38 @@ class PrithviSegWrapper(nn.Module):
     def __init__(self, terratorch_model: nn.Module):
         super().__init__()
         self.model = terratorch_model
+        self._debug_printed = False
+
+    def _find_backbone(self) -> Optional[torch.nn.Module]:
+        """Locate the Prithvi backbone inside the TerraTorch model."""
+        for attr in ('backbone', 'encoder', 'model'):
+            obj = getattr(self.model, attr, None)
+            if obj is not None and hasattr(obj, 'num_frames'):
+                return obj
+        return None
 
     def forward(
         self,
         spectral: torch.Tensor,
         temporal_coords: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # TerraTorch's Prithvi segmentation models return a ModelOutput or Tensor.
-        # The API accepts pixel_values=(B,T,C,H,W) and temporal_coords=(B,T).
-        # Adjust here if the installed TerraTorch version uses different arg names.
-        # Prithvi's Conv3d patch_embed expects (B, C, T, H, W); our data is (B, T, C, H, W)
+        B, T, C, H, W = spectral.shape
+
+        # Print actual input shape once so we can verify H=W=128.
+        if not self._debug_printed:
+            print(f'[model] Input shape to model: (B={B}, T={T}, C={C}, H={H}, W={W})')
+            self._debug_printed = True
+
+        # Prithvi's Conv3d patch_embed expects (B, C, T, H, W); our data is (B, T, C, H, W).
         spectral = spectral.permute(0, 2, 1, 3, 4).contiguous()
+
+        # Dynamically update the backbone's temporal dimension so
+        # prepare_features_for_image_model reshapes with the actual batch t.
+        # BucketSampler guarantees every example in this batch has the same T.
+        backbone = self._find_backbone()
+        if backbone is not None and hasattr(backbone, 'num_frames'):
+            backbone.num_frames = T
+
         out = self.model(spectral, temporal_coords=temporal_coords)
         # ModelOutput → extract the segmentation logits tensor
         if hasattr(out, 'output'):
@@ -239,6 +260,31 @@ def load_model(
             'and add the correct name as the first entry in _BACKBONE_CANDIDATES in\n'
             'train/model.py.'
         )
+
+    # ── post-init backbone patch ──────────────────────────────────────────────
+    # backbone_kwargs may not propagate img_size / num_frames to all TerraTorch
+    # versions. Patch attributes directly so prepare_features_for_image_model
+    # uses the correct spatial grid. num_frames is also overridden per-batch in
+    # PrithviSegWrapper.forward; this sets a sane default.
+    _backbone_obj = None
+    for _attr in ('backbone', 'encoder'):
+        _candidate = getattr(terratorch_model, _attr, None)
+        if _candidate is not None and hasattr(_candidate, 'num_frames'):
+            _backbone_obj = _candidate
+            break
+
+    if _backbone_obj is not None:
+        _ph = patch_size // 16   # Prithvi patch size = 16
+        _old_nf = getattr(_backbone_obj, 'num_frames', '?')
+        _old_pg = getattr(_backbone_obj, 'patch_grid_size', '?')
+        if hasattr(_backbone_obj, 'num_frames'):
+            _backbone_obj.num_frames = num_frames_max
+        if hasattr(_backbone_obj, 'patch_grid_size'):
+            _backbone_obj.patch_grid_size = (_ph, _ph)
+        print(f'[model] Backbone patched: num_frames {_old_nf}→{num_frames_max}, '
+              f'patch_grid_size {_old_pg}→({_ph},{_ph})')
+    else:
+        print('[model] WARNING: could not locate backbone to patch num_frames/patch_grid_size.')
 
     # ── freeze backbone / encoder ─────────────────────────────────────────────
     frozen_count = 0

@@ -301,13 +301,11 @@ def main():
     class_weights = compute_class_weights(TRAIN_AOIS, args.data_root, device=device)
 
     # ── model ──────────────────────────────────────────────────────────────────
+    # num_frames_max tells the backbone its fixed temporal depth at init time.
+    # BucketSampler ensures every batch has a uniform t; PrithviSegWrapper.forward
+    # updates backbone.num_frames dynamically per batch so the reshape is correct.
     num_frames_max = max(train_ds.max_t, val_ds.max_t)
     print(f'\n[train] num_frames_max={num_frames_max}')
-
-    # Rebuild datasets with num_frames_max so __getitem__ pads to fixed length.
-    # Must happen AFTER num_frames_max is known but before loaders are used.
-    train_ds.num_frames_max = num_frames_max
-    val_ds.num_frames_max   = num_frames_max
 
     model = load_model(
         num_frames_max=num_frames_max,

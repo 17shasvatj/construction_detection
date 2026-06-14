@@ -488,25 +488,15 @@ class ConstructionDataset(Dataset):
         if self.split == 'train':
             spectral_t, target_t = _augment(spectral_t, target_t)
 
-        # Pad to num_frames_max so Prithvi's fixed-T patch_embed gets uniform input.
-        # Prepend zero frames (sentinel: normalized value ~−mean/std, distinct from data).
-        # Padded dates are set to −1.0 (out-of-range sentinel for temporal embedding).
-        if self.num_frames_max is not None:
-            n = spectral_t.shape[0]
-            pad = self.num_frames_max - n
-            if pad > 0:
-                spectral_t = torch.cat(
-                    [torch.zeros(pad, 6, P, P, dtype=spectral_t.dtype), spectral_t], dim=0
-                )
-                dates_t = torch.cat(
-                    [torch.full((pad,), -1.0, dtype=dates_t.dtype), dates_t], dim=0
-                )
-
         return spectral_t, dates_t, target_t, ex['n_frames']
+
+    def get_t(self, idx: int) -> int:
+        """Return n_valid_frames for example idx (used by BucketSampler)."""
+        return self.examples[idx]['n_frames']
 
     @property
     def max_t(self) -> int:
-        """Maximum n_valid_frames across all examples (used to set model num_frames_max)."""
+        """Maximum n_valid_frames across all examples."""
         return max(ex['n_frames'] for ex in self.examples)
 
 
