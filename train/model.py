@@ -214,13 +214,9 @@ def load_model(
 
     # ── try factory with candidate backbone names ─────────────────────────────
     _BACKBONE_CANDIDATES = [
+        'prithvi_eo_v2_300',
         'prithvi_eo_v2_300m',
         'Prithvi_EO_V2_300M',
-        'prithvi_eo_v2_b_300m',
-        'prithvi_eo_300m',
-        'PrithviEO_V2_300M',
-        'prithvi_eo_b_300m',
-        'prithvi_eo_v2',
     ]
 
     factory = EncoderDecoderFactory()
