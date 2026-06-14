@@ -159,9 +159,27 @@ def train_epoch(
         dates    = dates.to(device)       # (B, K)
         target   = target.to(device)      # (B, P, P)
 
+        # First-batch diagnostics: verify normalization scale and check for NaN.
+        if n_batches == 0:
+            s = spectral.float()
+            print(f'[train] First batch spectral: '
+                  f'min={s.min():.4f}  max={s.max():.4f}  mean={s.mean():.4f}  '
+                  f'shape={tuple(spectral.shape)}')
+            if torch.isnan(s).any():
+                raise RuntimeError(
+                    '[train] NaN in input spectral on first batch. '
+                    'Check dataset normalization / NaN fill.')
+
         optimizer.zero_grad()
         logits = model(spectral, temporal_coords=dates)   # (B, C, P, P)
         loss   = criterion(logits, target)
+
+        if torch.isnan(loss):
+            raise RuntimeError(
+                f'[train] NaN loss at batch {n_batches}. '
+                'Likely cause: normalization scale mismatch or NaN in inputs. '
+                'Check spectral min/max printed above.')
+
         loss.backward()
         optimizer.step()
 

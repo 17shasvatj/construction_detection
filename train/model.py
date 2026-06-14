@@ -212,16 +212,24 @@ def load_model(
         )
 
     # ── freeze backbone / encoder ─────────────────────────────────────────────
+    # Keywords match Prithvi backbone params only. Neck (LearnedInterpolateToPyramidal)
+    # and decoder (UNetDecoder) params do NOT match these names and stay trainable.
+    _FREEZE_KEYWORDS = ('backbone', 'encoder', 'patch_embed', 'blocks')
     frozen_count = 0
     for name, param in terratorch_model.named_parameters():
-        if any(kw in name for kw in ('backbone', 'encoder', 'patch_embed', 'blocks')):
+        if any(kw in name for kw in _FREEZE_KEYWORDS):
             param.requires_grad_(False)
             frozen_count += 1
 
-    trainable = sum(p.numel() for p in terratorch_model.parameters() if p.requires_grad)
+    trainable_params = [(n, p) for n, p in terratorch_model.named_parameters()
+                        if p.requires_grad]
+    trainable = sum(p.numel() for _, p in trainable_params)
     total     = sum(p.numel() for p in terratorch_model.parameters())
     print(f'[model] Frozen {frozen_count} param tensors. '
           f'Trainable: {trainable:,} / {total:,} ({100*trainable/total:.1f}%).')
+    print('[model] Trainable param groups (first 8):')
+    for n, p in trainable_params[:8]:
+        print(f'  {n}  {tuple(p.shape)}')
 
     model = PrithviSegWrapper(terratorch_model)
     return model.to(torch.device(device))
