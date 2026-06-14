@@ -83,6 +83,8 @@ class PrithviSegWrapper(nn.Module):
         # TerraTorch's Prithvi segmentation models return a ModelOutput or Tensor.
         # The API accepts pixel_values=(B,T,C,H,W) and temporal_coords=(B,T).
         # Adjust here if the installed TerraTorch version uses different arg names.
+        # Prithvi's Conv3d patch_embed expects (B, C, T, H, W); our data is (B, T, C, H, W)
+        spectral = spectral.permute(0, 2, 1, 3, 4).contiguous()
         out = self.model(spectral, temporal_coords=temporal_coords)
         # ModelOutput → extract the segmentation logits tensor
         if hasattr(out, 'output'):
