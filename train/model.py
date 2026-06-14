@@ -76,7 +76,8 @@ class PrithviSegWrapper(nn.Module):
         # Prithvi's Conv3d patch_embed expects (B, C, T, H, W).
         spectral = spectral.permute(0, 2, 1, 3, 4).contiguous()
 
-        out = self.model(spectral, temporal_coords=temporal_coords)
+        # backbone_coords_encoding=[] means no temporal/location metadata expected.
+        out = self.model(spectral)
 
         if hasattr(out, 'output'):
             return out.output
@@ -128,17 +129,6 @@ def load_model(
             '    pip install terratorch\n'
             'For local CPU smoke-testing, pass --smoke-test to train.py / evaluate.py.\n'
         )
-
-    # Optional: HLSBands enum for explicit band specification
-    try:
-        from terratorch.datasets.utils import HLSBands
-        _BANDS = [
-            HLSBands.BLUE, HLSBands.GREEN, HLSBands.RED,
-            HLSBands.NIR_NARROW, HLSBands.SWIR_1, HLSBands.SWIR_2,
-        ]
-    except (ImportError, AttributeError):
-        _BANDS = None
-        print('[model] HLSBands not found; omitting backbone_bands from build call.')
 
     print(f'[model] Loading Prithvi-EO-2.0-300M via TerraTorch '
           f'(num_frames={num_frames_max}, patch_size={patch_size}, num_classes={num_classes})...')
@@ -194,20 +184,19 @@ def load_model(
                 task='segmentation',
                 backbone=backbone_name,
                 backbone_pretrained=True,
-                backbone_num_frames=num_frames_max,
-                decoder='UperNetDecoder',
-                decoder_channels=256,
-                num_classes=num_classes,
+                backbone_num_frames=num_frames_max,   # K=6
+                backbone_bands=['BLUE', 'GREEN', 'RED', 'NIR_NARROW', 'SWIR_1', 'SWIR_2'],
+                backbone_coords_encoding=[],          # no time/loc metadata
                 necks=[
-                    {'name': 'SelectIndices', 'indices': [-1]},
-                    {'name': 'ReshapeTokensToImage',
-                     'remove_cls_token':    True,
-                     'effective_time_dim':  num_frames_max,
-                     'temporal_inputs':     True},
+                    {'name': 'SelectIndices', 'indices': [5, 11, 17, 23]},
+                    {'name': 'ReshapeTokensToImage', 'effective_time_dim': num_frames_max},
+                    {'name': 'LearnedInterpolateToPyramidal'},
                 ],
+                decoder='UNetDecoder',
+                decoder_channels=[512, 256, 128, 64],
+                num_classes=num_classes,
+                head_dropout=0.1,
             )
-            if _BANDS is not None:
-                build_kwargs['backbone_bands'] = _BANDS
             terratorch_model = factory.build_model(**build_kwargs)
             print(f'[model] Backbone loaded: {backbone_name}')
             break
