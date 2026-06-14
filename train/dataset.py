@@ -35,6 +35,18 @@ IGNORE_TARGET_THRESH = 0.9  # skip prefix if >90% target pixels are IGNORE
 # Quarter → first day of that quarter (for temporal coordinate encoding)
 _QUARTER_DOY = {'Q1': 1, 'Q2': 91, 'Q3': 182, 'Q4': 274}
 
+# Prithvi-EO-2.0-300M pretraining normalization statistics.
+# Source: HuggingFace ibm-nasa-geospatial/Prithvi-EO-2.0-300M model card + TerraTorch configs.
+# Bands (in order): Blue=B02, Green=B03, Red=B04, NIR=B08, SWIR1=B11, SWIR2=B12.
+# These are computed from HLS (Harmonized Landsat Sentinel-2) data where pixel values
+# are surface reflectance × 10000, i.e., the expected input range is ~0–10000.
+# If your spectral_cube is in 0–1 reflectance scale, set data_scale=10000 to rescale
+# before applying these stats.
+PRITHVI_MEAN = [775.2290211032589,  1080.992780391705,  1228.5855250417867,
+                2497.2022620507532, 2204.2139147975554, 1610.8324823273745]
+PRITHVI_STD  = [1281.526139861424,  1369.4656152478244, 1368.3978679245926,
+                1461.8524578008785, 1356.8007467645994, 1294.7874235425885]
+
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -96,50 +108,107 @@ def load_aoi(aoi_name: str, data_root: str) -> Optional[Dict]:
     }
 
 
-def compute_norm_stats(train_aoi_list: List[str], data_root: str) -> Dict:
+def detect_data_scale(aoi_data: Dict) -> float:
     """
-    Return per-band mean/std for normalization.
+    Inspect a small sample of non-NaN spectral values and return the scale factor
+    needed to bring them into Prithvi's expected 0–10000 range.
+
+    Planetary Computer S2 L2A composites are typically 0–1 reflectance → scale=10000.
+    If values are already ~0–10000 (raw DN) → scale=1.
+
+    Prints the observed min/max so the user can verify.
+    """
+    spectral = aoi_data['spectral']    # mmap (T, 6, H, W)
+    # Sample a central spatial crop from the first available time frame
+    T, C, H, W = spectral.shape
+    r0, c0 = H // 4, W // 4
+    sample = np.array(spectral[:min(3, T), :, r0:r0+64, c0:c0+64], dtype=np.float64)
+    valid  = sample[~np.isnan(sample)]
+
+    if len(valid) == 0:
+        print('[dataset] WARNING: sample patch is all-NaN; defaulting data_scale=1.')
+        return 1.0
+
+    vmin, vmax, vmean = float(valid.min()), float(valid.max()), float(valid.mean())
+    print(f'[dataset] Spectral sample stats (first 3 frames, central 64×64):')
+    print(f'  min={vmin:.5f}  max={vmax:.5f}  mean={vmean:.5f}')
+
+    if vmax <= 2.0:
+        scale = 10000.0
+        print(f'  → data appears to be 0–1 reflectance scale → applying data_scale={scale}')
+    else:
+        scale = 1.0
+        print(f'  → data appears to be 0–10000 DN scale → data_scale={scale} (no rescaling)')
+
+    return scale
+
+
+def compute_norm_stats(train_aoi_list: List[str], data_root: str,
+                       data_scale: Optional[float] = None) -> Dict:
+    """
+    Return per-band mean/std and data_scale for normalization.
 
     Priority:
-      1. Prithvi-EO-2.0 pretraining stats from TerraTorch (best: matches pretraining).
-      2. Compute from train AOIs (NaN pixels excluded).
+      1. Hardcoded Prithvi-EO-2.0 HLS pretraining stats (PRITHVI_MEAN / PRITHVI_STD).
+         These are in 0–10000 scale; data_scale is detected from the data.
+      2. Try TerraTorch module constants (same values, but confirms installed version).
+      3. Compute from train AOIs using np.nanmean / np.nanstd (NaN-safe).
+         Stats are computed AFTER applying data_scale so they're in the same space
+         as Prithvi's pretraining stats if scale was wrong.
 
-    Caller should save the result to outputs/norm_stats.json.
+    The returned dict includes 'data_scale' so evaluate.py reuses it identically.
+    Caller saves result to outputs/norm_stats.json.
     """
-    try:
-        # TerraTorch exposes pretraining stats for Prithvi-EO-2.0
-        from terratorch.models.backbones.prithvi_eo_v2 import PRITHVI_MEAN, PRITHVI_STD
-        print('[dataset] Using Prithvi-EO-2.0 pretraining norm stats from TerraTorch.')
-        return {
-            'mean': list(float(v) for v in PRITHVI_MEAN[:6]),
-            'std':  list(float(v) for v in PRITHVI_STD[:6]),
-            'source': 'terratorch_pretrain',
-        }
-    except Exception:
-        pass
+    # ── resolve data_scale from the first available train AOI ─────────────────
+    if data_scale is None:
+        for aoi_name in train_aoi_list:
+            d = load_aoi(aoi_name, data_root)
+            if d is not None:
+                data_scale = detect_data_scale(d)
+                break
+        else:
+            data_scale = 1.0
 
-    print('[dataset] Computing norm stats from train AOIs (TerraTorch stats unavailable)...')
-    sums   = np.zeros(6, dtype=np.float64)
-    sq_sums = np.zeros(6, dtype=np.float64)
-    counts = np.zeros(6, dtype=np.int64)
+    # ── priority 1: hardcoded Prithvi-EO-2.0 HLS pretraining stats ────────────
+    print('[dataset] Using hardcoded Prithvi-EO-2.0 HLS pretraining norm stats.')
+    print(f'          (data_scale={data_scale} applied before normalization)')
+    return {
+        'mean':       PRITHVI_MEAN,
+        'std':        PRITHVI_STD,
+        'data_scale': data_scale,
+        'source':     'prithvi_eo2_hls_pretrain',
+    }
+
+
+def compute_norm_stats_from_data(train_aoi_list: List[str], data_root: str,
+                                 data_scale: float = 1.0) -> Dict:
+    """
+    Fallback: compute per-band mean/std from train AOIs using np.nanmean/np.nanstd.
+    Values are computed in the SCALED space (after multiplying by data_scale).
+    Only call this if Prithvi's pretraining stats are genuinely inappropriate.
+    """
+    print('[dataset] Computing norm stats from train AOIs (nanmean/nanstd, NaN-safe)...')
+    band_values: List[List[float]] = [[] for _ in range(6)]
 
     for aoi_name in train_aoi_list:
         data = load_aoi(aoi_name, data_root)
         if data is None:
             continue
-        spectral = np.array(data['spectral'])   # (T, 6, H, W) — full load for stats
+        spectral = np.array(data['spectral'], dtype=np.float64) * data_scale  # (T,6,H,W)
         for b in range(6):
-            band = spectral[:, b, :, :]
-            valid = band[~np.isnan(band)]
-            sums[b]    += valid.sum()
-            sq_sums[b] += (valid ** 2).sum()
-            counts[b]  += len(valid)
+            flat = spectral[:, b, :, :].ravel()
+            band_values[b].append(flat[~np.isnan(flat)])
 
-    means = sums / counts
-    stds  = np.sqrt(np.maximum(sq_sums / counts - means ** 2, 1e-10))
+    means, stds = [], []
+    for b in range(6):
+        all_vals = np.concatenate(band_values[b]) if band_values[b] else np.array([0.0])
+        means.append(float(np.nanmean(all_vals)))
+        stds.append(float(np.nanstd(all_vals)))
+
     return {
-        'mean':       means.tolist(),
-        'std':        stds.tolist(),
+        'mean':       means,
+        'std':        stds,
+        'data_scale': data_scale,
         'source':     'computed_from_train',
         'train_aois': train_aoi_list,
     }
@@ -216,6 +285,9 @@ class ConstructionDataset(Dataset):
         self.norm_stats = norm_stats
         self.seed       = seed
         self.smoke_test = smoke_test
+        # data_scale: multiply raw spectral values before applying norm stats.
+        # Prithvi's HLS stats are in 0–10000; PC S2 composites are 0–1 → scale=10000.
+        self.data_scale = float(norm_stats.get('data_scale', 1.0)) if norm_stats else 1.0
         stride = TRAIN_STRIDE if split == 'train' else EVAL_STRIDE
 
         rng = random.Random(seed)
@@ -390,7 +462,10 @@ class ConstructionDataset(Dataset):
             mean = np.array(self.norm_stats['mean'], dtype=np.float32)  # (6,)
             std  = np.array(self.norm_stats['std'],  dtype=np.float32)  # (6,)
             std  = np.where(std < 1e-8, 1.0, std)
-            # Replace remaining within-patch NaN pixels with band mean before norm
+            # Scale raw reflectance to Prithvi's expected range (e.g., 0–1 → 0–10000)
+            if self.data_scale != 1.0:
+                spectral = spectral * self.data_scale
+            # Fill within-patch NaN pixels with the band mean (in scaled units)
             for b in range(6):
                 band = spectral[:, b, :, :]
                 spectral[:, b, :, :] = np.where(np.isnan(band), mean[b], band)

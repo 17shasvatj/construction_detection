@@ -98,9 +98,10 @@ def tile_inference_at_t(
     T, C, H, W = spectral_cube.shape
     assert t < T, f'Target t={t} out of range for T={T}'
 
-    mean = np.array(norm_stats['mean'], dtype=np.float32)   # (6,)
-    std  = np.array(norm_stats['std'],  dtype=np.float32)
-    std  = np.where(std < 1e-8, 1.0, std)
+    mean       = np.array(norm_stats['mean'], dtype=np.float32)   # (6,)
+    std        = np.array(norm_stats['std'],  dtype=np.float32)
+    std        = np.where(std < 1e-8, 1.0, std)
+    data_scale = float(norm_stats.get('data_scale', 1.0))
 
     logit_sum = np.zeros((NUM_CLASSES, H, W), dtype=np.float32)
     count_map = np.zeros((H, W), dtype=np.int32)
@@ -120,7 +121,9 @@ def tile_inference_at_t(
 
         spectral = spectral_cube[valid_idxs, :, r:r+P, c:c+P].astype(np.float32)
 
-        # Normalize (fill residual NaN with band mean first)
+        # Scale to Prithvi's expected range, then normalize
+        if data_scale != 1.0:
+            spectral = spectral * data_scale
         for b in range(6):
             band = spectral[:, b, :, :]
             spectral[:, b, :, :] = np.where(np.isnan(band), mean[b], band)
