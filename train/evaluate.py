@@ -7,14 +7,17 @@ Produces:
   (c) Non-circularity / early-detection count (model predicts before DW label)
   (d) Two-tier grading eval (quantitative for confirmed trajectories; qualitative-only
       for active-grading pixels — no precision number, stated explicitly)
-  (e) Failure demos on desert + austin (optional)
+  (e) Failure demos on desert + austin (default run only)
   (f) Summary table of macro-averaged + peak metrics ready to drop into the report
+  (g) Spot-check sites — spatially stratified predicted-construction pixels
+      with lat/lon for live demo verification (--aoi mode only)
 
 Usage:
-    # default: evaluate on VAL_AOIS (wendell)
+    # default: evaluate on VAL_AOIS (wendell), run failure demos
     python train/evaluate.py
 
-    # evaluate on a specific AOI (must have spectral_cube.npy + label_cube.npy)
+    # evaluate on a specific AOI (must have spectral_cube.npy + metadata.json;
+    # label_cube.npy optional — metrics skipped if missing)
     python train/evaluate.py --aoi lakewood_ranch
     python train/evaluate.py --aoi wendell --device cuda
 
@@ -68,19 +71,15 @@ FAILURE_DEMO_AOIS = ['desert', 'austin']
 NUM_CLASSES = 3
 CLASS_NAMES = {0: 'baseline', 1: 'grading', 2: 'constructed'}
 
-# RGB colours for prediction maps. Use np.array so /255. broadcasts correctly
-# (this was the cause of the "unsupported operand type(s) for /: 'list' and 'float'"
-# error — Python lists don't divide).
 CLASS_COLORS = np.array([
-    [0,   180,  0],    # 0 baseline  → green
-    [255, 165,  0],    # 1 grading   → orange
-    [200,   0,  0],    # 2 built     → red
-    [50,   50, 50],    # 255 ignore  → dark grey
+    [0,   180,  0],
+    [255, 165,  0],
+    [200,   0,  0],
+    [50,   50, 50],
 ], dtype=np.uint8)
 
 
 def _class_to_rgb(arr: np.ndarray) -> np.ndarray:
-    """(H, W) uint8 → (H, W, 3) RGB using CLASS_COLORS."""
     mapped = arr.copy().astype(np.int32)
     mapped[mapped == IGNORE_LABEL] = 3
     mapped = np.clip(mapped, 0, 3)
@@ -91,22 +90,15 @@ def _class_to_rgb(arr: np.ndarray) -> np.ndarray:
 
 def tile_inference_at_t(
     model: torch.nn.Module,
-    spectral_cube: np.ndarray,    # (T, 6, H, W) float
-    nan_flag: np.ndarray,         # (T, H, W) bool  (unused here but kept for API compat)
-    dates: np.ndarray,            # (T,) float32
+    spectral_cube: np.ndarray,
+    nan_flag: np.ndarray,
+    dates: np.ndarray,
     t: int,
     norm_stats: Dict,
     device: torch.device,
     patch_size: int = PATCH_SIZE,
     stride: int = EVAL_STRIDE,
 ) -> np.ndarray:
-    """
-    Tile inference for a single target timepoint t using the fixed K-frame window.
-    Input: spectral[t-K:t] (K consecutive frames, all causally valid).
-    NaN pixels are filled with band mean; the window length stays fixed at K.
-    Skips patches where t < K. Returns (H, W) predicted class map.
-    Overlapping logits are averaged before argmax.
-    """
     T, C, H, W = spectral_cube.shape
     assert t < T, f'Target t={t} out of range for T={T}'
 
@@ -126,10 +118,8 @@ def tile_inference_at_t(
     for (r, c) in positions:
         P = patch_size
 
-        # Fixed K-frame causal window: spectral[t-K:t]
-        spectral = spectral_cube[t-K:t, :, r:r+P, c:c+P].astype(np.float32)  # (K,6,P,P)
+        spectral = spectral_cube[t-K:t, :, r:r+P, c:c+P].astype(np.float32)
 
-        # Scale then fill NaN pixels with band mean, then standardize.
         if data_scale != 1.0:
             spectral = spectral * data_scale
         for b in range(6):
@@ -137,14 +127,14 @@ def tile_inference_at_t(
             spectral[:, b, :, :] = np.where(np.isnan(band), mean[b], band)
         spectral = (spectral - mean[None, :, None, None]) / std[None, :, None, None]
 
-        date_patch = dates[t-K:t]   # (K,)
+        date_patch = dates[t-K:t]
 
-        s_t = torch.from_numpy(spectral).unsqueeze(0).to(device)    # (1, K, 6, P, P)
-        d_t = torch.from_numpy(date_patch).unsqueeze(0).to(device)  # (1, K)
+        s_t = torch.from_numpy(spectral).unsqueeze(0).to(device)
+        d_t = torch.from_numpy(date_patch).unsqueeze(0).to(device)
 
         with torch.no_grad():
-            logits = model(s_t, temporal_coords=d_t)   # (1, C, P, P)
-        logits_np = logits[0].cpu().float().numpy()    # (C, P, P)
+            logits = model(s_t, temporal_coords=d_t)
+        logits_np = logits[0].cpu().float().numpy()
 
         logit_sum[:, r:r+P, c:c+P] += logits_np
         count_map[r:r+P, c:c+P]    += 1
@@ -166,11 +156,7 @@ def run_tiled_inference(
     patch_size: int = PATCH_SIZE,
     stride: int = EVAL_STRIDE,
 ) -> np.ndarray:
-    """
-    Run causal inference at every timepoint t ∈ [t_start .. T-1].
-    Returns pred_cube (T, H, W) uint8 (IGNORE_LABEL where inference skipped).
-    """
-    spectral = aoi_data['spectral'][:]    # load fully: (T, 6, H, W)
+    spectral = aoi_data['spectral'][:]
     nan_flag = aoi_data['nan_flag']
     dates    = aoi_data['dates']
     T, _, H, W = spectral.shape
@@ -190,11 +176,10 @@ def run_tiled_inference(
 # ── per-timepoint metrics ──────────────────────────────────────────────────────
 
 def per_timepoint_metrics(
-    pred_cube: np.ndarray,    # (T, H, W) uint8
-    label_cube: np.ndarray,   # (T, H, W) uint8
+    pred_cube: np.ndarray,
+    label_cube: np.ndarray,
     t_start: int,
 ) -> List[Dict]:
-    """Compute per-class P/R/F1/IoU + confusion matrix at each timepoint t."""
     T = pred_cube.shape[0]
     results = []
 
@@ -231,13 +216,6 @@ def print_summary_table(
     tp_results: List[Dict],
     aoi_name: str,
 ):
-    """
-    Print the macro-averaged + peak per-class metrics in a format ready to drop
-    into the report. Skips all-zero timepoints (lacking K-frame history).
-    Grading is averaged over t where it has positive support (excludes
-    structural-zero endpoints where ground truth has relabeled to constructed).
-    """
-    # Filter out timepoints where ALL classes are zero (insufficient history)
     valid = [
         r for r in tp_results
         if any(r['metrics'].get(c, {}).get('f1', 0.0) > 0 or
@@ -252,17 +230,14 @@ def print_summary_table(
     print(f'\n{"="*70}')
     print(f'SUMMARY METRICS FOR REPORT — {aoi_name.upper()}')
     print(f'{"="*70}')
-    print(f'Eval timepoints: t={valid[0]["t"]} ({valid[0]["t"]}) → t={valid[-1]["t"]} '
+    print(f'Eval timepoints: t={valid[0]["t"]} → t={valid[-1]["t"]} '
           f'(n={len(valid)} timepoints)')
     print()
 
-    # Macro-averages
     print(f'MACRO-AVERAGES ACROSS VALID TIMEPOINTS')
     print(f'  {"class":<14s} {"P":>7s} {"R":>7s} {"F1":>7s} {"IoU":>7s} {"n_t":>5s}')
     print(f'  {"-"*14} {"-"*7} {"-"*7} {"-"*7} {"-"*7} {"-"*5}')
     for c in [0, 1, 2]:
-        # For class c, include only timepoints where it has positive support
-        # (avoids structural-zero rows where labels=0 for that class)
         rows = [
             r for r in valid
             if r['metrics'].get(c, {}).get('tp', 0) + r['metrics'].get(c, {}).get('fn', 0) > 0
@@ -279,7 +254,6 @@ def print_summary_table(
               f'{np.mean(f1s):>7.3f} {np.mean(ious):>7.3f} '
               f'{len(rows):>5d}')
 
-    # Peaks
     print()
     print(f'PEAK F1 PER CLASS (best single timepoint)')
     print(f'  {"class":<14s} {"peak F1":>9s} {"@ t":>5s} {"P":>7s} {"R":>7s}')
@@ -295,12 +269,10 @@ def print_summary_table(
               f'{m["f1"]:>9.3f} {best["t"]:>5d} '
               f'{m["precision"]:>7.3f} {m["recall"]:>7.3f}')
 
-    # Recall-vs-history (constructed) — architecture-working evidence
     print()
     print(f'CONSTRUCTED RECALL vs HISTORY LENGTH (architecture validation)')
     cons_rows = [r for r in valid if r['metrics'].get(2, {}).get('recall', 0) > 0]
     if cons_rows:
-        # Print early, middle, late
         n = len(cons_rows)
         snapshot_idxs = [0, n // 4, n // 2, (3 * n) // 4, n - 1]
         snapshot_idxs = sorted(set(snapshot_idxs))
@@ -309,18 +281,16 @@ def print_summary_table(
             r = cons_rows[i]
             print(f'  {r["t"]:>4d} {r["metrics"][2]["recall"]:>16.3f}')
 
-    # Final-quarter metrics for persistent classes
     print()
     print(f'FINAL-QUARTER METRICS (persistent classes)')
     last = valid[-1]
     print(f'  t={last["t"]}')
-    for c in [0, 2]:  # skip grading (structural zero at endpoint)
+    for c in [0, 2]:
         m = last['metrics'].get(c, {})
         if m.get('precision', 0) + m.get('recall', 0) > 0:
             print(f'  {CLASS_NAMES[c]:<14s} P={m["precision"]:.3f}  '
                   f'R={m["recall"]:.3f}  F1={m["f1"]:.3f}  IoU={m["iou"]:.3f}')
 
-    # Mid-trajectory grading (where ground truth is populated)
     grad_rows = [r for r in valid
                  if r['metrics'].get(1, {}).get('tp', 0) + r['metrics'].get(1, {}).get('fn', 0) > 100]
     if grad_rows:
@@ -338,17 +308,140 @@ def print_summary_table(
     print(f'{"="*70}\n')
 
 
+# ── (g) spot-check sites (demo aid for --aoi mode) ─────────────────────────────
+
+def print_spot_check_sites(
+    pred_cube: np.ndarray,             # (T, H, W) uint8
+    label_cube: Optional[np.ndarray],  # (T, H, W) uint8 or None
+    quarters: List[str],
+    bbox: List[float],                  # [lon_min, lat_min, lon_max, lat_max]
+    aoi_name: str,
+    output_dir: str,
+    t_idx: int = -1,
+    n_per_class: int = 5,
+    grid_size: int = 4,
+    seed: int = 42,
+):
+    """
+    Sample spatially-stratified predicted-construction and predicted-grading
+    pixels at a given timepoint (default: final quarter) for live demo
+    verification.
+
+    Spatially stratifies by dividing the AOI into a grid_size × grid_size grid
+    and selecting at most one pixel per grid cell — so the printed sites are
+    spread across the AOI rather than clustering in one subdivision.
+
+    Prints a table (pixel coords, lat/lon, predicted class, DW label if
+    available) to stdout and saves the same content to
+    outputs/spot_check_{aoi}.txt.
+    """
+    T, H, W = pred_cube.shape
+    if t_idx < 0:
+        t_idx = T + t_idx
+    quarter = quarters[t_idx] if 0 <= t_idx < len(quarters) else f't={t_idx}'
+
+    pred_t  = pred_cube[t_idx]
+    label_t = label_cube[t_idx] if label_cube is not None else None
+
+    lon_min, lat_min, lon_max, lat_max = bbox
+
+    def pixel_to_lonlat(y: int, x: int) -> Tuple[float, float]:
+        """Pixel (row, col) → (lon, lat). Row 0 is the NORTH edge."""
+        lon = lon_min + (x + 0.5) / W * (lon_max - lon_min)
+        lat = lat_max - (y + 0.5) / H * (lat_max - lat_min)
+        return lon, lat
+
+    rng = np.random.default_rng(seed)
+
+    def stratified_sample(mask: np.ndarray, n: int) -> List[Tuple[int, int]]:
+        """Pick up to n pixels from mask, at most one per grid cell."""
+        ys, xs = np.where(mask)
+        if len(ys) == 0:
+            return []
+        cell_h = max(1, H // grid_size)
+        cell_w = max(1, W // grid_size)
+        by_cell: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
+        for y, x in zip(ys, xs):
+            cell = (int(y) // cell_h, int(x) // cell_w)
+            by_cell.setdefault(cell, []).append((int(y), int(x)))
+        cells = list(by_cell.keys())
+        rng.shuffle(cells)
+        sampled = []
+        for cell in cells:
+            if len(sampled) >= n:
+                break
+            pixels_in_cell = by_cell[cell]
+            idx = rng.integers(0, len(pixels_in_cell))
+            sampled.append(pixels_in_cell[idx])
+        return sampled
+
+    grading_sites     = stratified_sample(pred_t == 1, n_per_class)
+    constructed_sites = stratified_sample(pred_t == 2, n_per_class)
+
+    # Build lines (printed AND saved)
+    lines = []
+    lines.append(f'\n{"="*70}')
+    lines.append(f'SPOT-CHECK SITES — {aoi_name.upper()}')
+    lines.append(f'{"="*70}')
+    lines.append(f'Timepoint: {quarter} (t={t_idx})')
+    lines.append(f'Spatial stratification: {grid_size}x{grid_size} grid '
+                 f'(max one pixel per cell)')
+    lines.append(f'Found {len(grading_sites)} grading + {len(constructed_sites)} '
+                 f'constructed predicted sites')
+    lines.append('')
+
+    def fmt_section(header: str, sites: List[Tuple[int, int]]):
+        lines.append(header)
+        if not sites:
+            lines.append('  (no predictions in this class at this timepoint)')
+            return
+        if label_t is not None:
+            lines.append(f'  {"#":>3s}  {"pixel(y,x)":>14s}  {"lat":>10s}  {"lon":>11s}  '
+                         f'{"pred":>12s}  {"DW label":>12s}')
+        else:
+            lines.append(f'  {"#":>3s}  {"pixel(y,x)":>14s}  {"lat":>10s}  {"lon":>11s}  '
+                         f'{"pred":>12s}')
+        for i, (y, x) in enumerate(sites, start=1):
+            lon, lat = pixel_to_lonlat(y, x)
+            pred_name = CLASS_NAMES.get(int(pred_t[y, x]), f'cls{int(pred_t[y, x])}')
+            if label_t is not None:
+                lbl_val = int(label_t[y, x])
+                if lbl_val == IGNORE_LABEL:
+                    lbl_name = 'ignore'
+                else:
+                    lbl_name = CLASS_NAMES.get(lbl_val, f'cls{lbl_val}')
+                lines.append(f'  {i:>3d}  ({y:>4d},{x:>4d})  '
+                             f'{lat:>10.5f}  {lon:>11.5f}  '
+                             f'{pred_name:>12s}  {lbl_name:>12s}')
+            else:
+                lines.append(f'  {i:>3d}  ({y:>4d},{x:>4d})  '
+                             f'{lat:>10.5f}  {lon:>11.5f}  '
+                             f'{pred_name:>12s}')
+
+    fmt_section('GRADING (predicted=1)', grading_sites)
+    lines.append('')
+    fmt_section('CONSTRUCTED (predicted=2)', constructed_sites)
+    lines.append(f'{"="*70}')
+
+    text = '\n'.join(lines) + '\n'
+    print(text)
+
+    txt_path = os.path.join(output_dir, f'spot_check_{aoi_name}.txt')
+    with open(txt_path, 'w') as f:
+        f.write(text)
+    print(f'[eval] Spot-check sites saved -> {txt_path}')
+
+
 # ── (b) trajectory / progression figures ──────────────────────────────────────
 
 def save_trajectory_maps(
-    pred_cube: np.ndarray,    # (T, H, W)
+    pred_cube: np.ndarray,
     label_cube: np.ndarray,
     quarters: List[str],
     aoi_name: str,
     figures_dir: str,
     t_start: int,
 ):
-    """Save side-by-side predicted vs DW label maps for each timepoint."""
     if not HAS_MPL:
         return
     T = pred_cube.shape[0]
@@ -357,7 +450,7 @@ def save_trajectory_maps(
         return
 
     cols = min(n_t, 6)
-    rows = ((n_t - 1) // cols + 1) * 2   # predicted + label rows
+    rows = ((n_t - 1) // cols + 1) * 2
     fig, axes = plt.subplots(rows, cols, figsize=(cols * 3, rows * 3))
     if rows == 1:
         axes = axes[np.newaxis, :]
@@ -375,14 +468,11 @@ def save_trajectory_maps(
         for ax in (axes[row_pred, col_i], axes[row_label, col_i]):
             ax.axis('off')
 
-    # Hide unused axes
     for i in range(n_t, rows // 2 * cols):
         col_i = i % cols
         for row in range(rows):
             axes[row, col_i].axis('off')
 
-    # BUG FIX: wrap each color in np.array so /255. broadcasts properly.
-    # Python lists don't support / with a scalar — that was the runtime error.
     from matplotlib.patches import Patch
     legend = [Patch(color=np.array(c) / 255., label=l) for c, l in [
         ([0, 180, 0],   'baseline'),
@@ -391,13 +481,13 @@ def save_trajectory_maps(
         ([50, 50, 50],  'ignore'),
     ]]
     fig.legend(handles=legend, loc='lower center', ncol=4, fontsize=8)
-    fig.suptitle(f'{aoi_name} — Predicted (top) vs DW Label (bottom)', fontsize=10)
+    fig.suptitle(f'{aoi_name} - Predicted (top) vs DW Label (bottom)', fontsize=10)
     plt.tight_layout(rect=[0, 0.05, 1, 1])
 
     path = os.path.join(figures_dir, f'{aoi_name}_trajectory_maps.png')
     fig.savefig(path, dpi=120, bbox_inches='tight')
     plt.close(fig)
-    print(f'[eval] Saved trajectory maps → {path}')
+    print(f'[eval] Saved trajectory maps -> {path}')
 
 
 def save_sample_pixel_trajectories(
@@ -409,7 +499,6 @@ def save_sample_pixel_trajectories(
     t_start: int,
     n_pixels: int = 5,
 ):
-    """Plot predicted vs DW label class over time for N sample pixels."""
     if not HAS_MPL:
         return
     T, H, W = label_cube.shape
@@ -446,12 +535,12 @@ def save_sample_pixel_trajectories(
         ax.legend(fontsize=7, loc='upper left')
         ax.set_ylim(-0.2, 2.5)
 
-    fig.suptitle(f'{aoi_name} — Sample pixel trajectories', fontsize=10)
+    fig.suptitle(f'{aoi_name} - Sample pixel trajectories', fontsize=10)
     plt.tight_layout()
     path = os.path.join(figures_dir, f'{aoi_name}_pixel_trajectories.png')
     fig.savefig(path, dpi=120, bbox_inches='tight')
     plt.close(fig)
-    print(f'[eval] Saved pixel trajectories → {path}')
+    print(f'[eval] Saved pixel trajectories -> {path}')
 
 
 def save_per_timepoint_curve(
@@ -459,7 +548,6 @@ def save_per_timepoint_curve(
     aoi_name: str,
     figures_dir: str,
 ):
-    """Plot F1 / IoU per class vs timepoint t (accuracy-vs-history-length curve)."""
     if not HAS_MPL:
         return
     ts    = [r['t'] for r in timepoint_results]
@@ -480,31 +568,25 @@ def save_per_timepoint_curve(
         ax.legend()
         ax.grid(alpha=0.3)
 
-    ax_f1.set_title(f'{aoi_name} — F1 vs history length')
-    ax_iou.set_title(f'{aoi_name} — IoU vs history length')
+    ax_f1.set_title(f'{aoi_name} - F1 vs history length')
+    ax_iou.set_title(f'{aoi_name} - IoU vs history length')
     plt.tight_layout()
 
     path = os.path.join(figures_dir, f'{aoi_name}_per_timepoint_curve.png')
     fig.savefig(path, dpi=120, bbox_inches='tight')
     plt.close(fig)
-    print(f'[eval] Saved per-timepoint curve → {path}')
+    print(f'[eval] Saved per-timepoint curve -> {path}')
 
 
 # ── (c) early detection ────────────────────────────────────────────────────────
 
 def compute_early_detection(
-    pred_cube: np.ndarray,    # (T, H, W)
+    pred_cube: np.ndarray,
     label_cube: np.ndarray,
     t_start: int,
 ) -> Dict:
-    """
-    Count (pixel, t) instances where model predicts grading/built while DW
-    label is still baseline, for pixels whose full trajectory confirms
-    construction. Non-circular detection beyond the DW label source.
-    """
     T, H, W = label_cube.shape
-
-    ever_built = np.any(label_cube == 2, axis=0)   # (H, W) bool
+    ever_built = np.any(label_cube == 2, axis=0)
 
     early_count = 0
     confirmed_count = int(ever_built.sum())
@@ -527,7 +609,7 @@ def compute_early_detection(
         'description': (
             'Count of (pixel, t) instances where the model predicts grading/built '
             'but DW label is still baseline, for pixels confirmed as construction '
-            'in their full trajectory. Non-circular detection beyond the label source.'
+            'in their full trajectory.'
         ),
     }
 
@@ -541,7 +623,6 @@ def save_early_detection_examples(
     t_start: int,
     n_examples: int = 5,
 ):
-    """Show trajectory plots highlighting timesteps where model leads DW."""
     if not HAS_MPL:
         return
     T, H, W = label_cube.shape
@@ -591,16 +672,16 @@ def save_early_detection_examples(
         ax.set_xticklabels(q_labels, rotation=45, ha='right', fontsize=6)
         ax.set_yticks([0, 1, 2])
         ax.set_yticklabels(['baseline', 'grading', 'built'])
-        ax.set_title(f'Pixel ({h},{w}) — yellow=model leads DW', fontsize=8)
+        ax.set_title(f'Pixel ({h},{w}) - yellow=model leads DW', fontsize=8)
         ax.legend(fontsize=7, loc='upper left')
         ax.set_ylim(-0.2, 2.5)
 
-    fig.suptitle(f'{aoi_name} — Early detection examples (model ahead of DW label)', fontsize=10)
+    fig.suptitle(f'{aoi_name} - Early detection examples (model ahead of DW label)', fontsize=10)
     plt.tight_layout()
     path = os.path.join(figures_dir, f'{aoi_name}_early_detection.png')
     fig.savefig(path, dpi=120, bbox_inches='tight')
     plt.close(fig)
-    print(f'[eval] Saved early-detection examples → {path}')
+    print(f'[eval] Saved early-detection examples -> {path}')
 
 
 # ── (d) two-tier grading eval ──────────────────────────────────────────────────
@@ -613,7 +694,6 @@ def two_tier_grading_eval(
     figures_dir: str,
     t_start: int,
 ) -> Dict:
-    """Tier 1: metrics on confirmed-trajectory pixels. Tier 2: map of active grading."""
     T, H, W = label_cube.shape
     ever_built = np.any(label_cube == 2, axis=0)
     ever_bare  = np.any(label_cube == 1, axis=0)
@@ -647,7 +727,7 @@ def two_tier_grading_eval(
                 ax.scatter(ax_, ay, c='cyan', s=1, marker='.', label='active grading')
                 ax.set_title(
                     f'{aoi_name} t={t} ({quarters[t]})\n'
-                    'ACTIVE GRADING (cyan) — No Ground Truth Available\n'
+                    'ACTIVE GRADING (cyan) - No Ground Truth Available\n'
                     'NO PRECISION NUMBER IS REPORTED FOR THESE PIXELS',
                     fontsize=8, color='darkred'
                 )
@@ -656,7 +736,7 @@ def two_tier_grading_eval(
                 path = os.path.join(figures_dir, f'{aoi_name}_active_grading_t{t}.png')
                 fig.savefig(path, dpi=120, bbox_inches='tight')
                 plt.close(fig)
-                print(f'[eval] Saved active-grading map (Tier 2) → {path}')
+                print(f'[eval] Saved active-grading map (Tier 2) -> {path}')
                 active_grading_maps[t] = path
                 break
 
@@ -665,7 +745,7 @@ def two_tier_grading_eval(
         'tier2_active_grading_maps':  active_grading_maps,
         'tier2_note': (
             'Active-grading pixels (label=1 at time t, no confirmed built outcome) '
-            'are shown on the map ONLY. No precision/recall is computed — '
+            'are shown on the map ONLY. No precision/recall is computed - '
             'these pixels have no verified ground truth.'
         ),
     }
@@ -674,7 +754,6 @@ def two_tier_grading_eval(
 # ── (e) failure demos ──────────────────────────────────────────────────────────
 
 def resolve_failure_aoi_dir(aoi_name: str, data_root: str) -> Optional[str]:
-    """Try data/{aoi}/ then {aoi}_data/ at project root."""
     standard = os.path.join(data_root, aoi_name)
     if os.path.exists(os.path.join(standard, 'spectral_cube.npy')):
         return standard
@@ -694,7 +773,6 @@ def run_failure_demo(
     figures_dir: str,
     wendell_metrics: Optional[Dict] = None,
 ) -> Optional[Dict]:
-    """Run inference on a failure-demo AOI; compare to wendell baseline if provided."""
     aoi_dir = resolve_failure_aoi_dir(aoi_name, data_root)
     if aoi_dir is None:
         print(f'[eval] {aoi_name}: no data found. Skipping.')
@@ -702,7 +780,6 @@ def run_failure_demo(
 
     data = load_aoi(aoi_name, aoi_dir.replace(f'/{aoi_name}', ''))
     if data is None:
-        # Direct load fallback
         sp = os.path.join(aoi_dir, 'spectral_cube.npy')
         lb = os.path.join(aoi_dir, 'label_cube.npy')
         mt = os.path.join(aoi_dir, 'metadata.json')
@@ -757,13 +834,13 @@ def run_failure_demo(
             d_f1 = metrics.get(1, {}).get('f1', float('nan'))
             fig.text(0.5, 0.01,
                      f'Grading F1: wendell={w_f1:.3f}  {aoi_name}={d_f1:.3f}  '
-                     f'Δ={d_f1 - w_f1:+.3f}',
+                     f'd={d_f1 - w_f1:+.3f}',
                      ha='center', fontsize=9, color='darkred')
 
         path = os.path.join(figures_dir, f'{aoi_name}_failure_demo_t{t_demo}.png')
         fig.savefig(path, dpi=120, bbox_inches='tight')
         plt.close(fig)
-        print(f'[eval] Saved failure-demo map → {path}')
+        print(f'[eval] Saved failure-demo map -> {path}')
 
     return {
         'aoi':     aoi_name,
@@ -771,6 +848,17 @@ def run_failure_demo(
         'quarter': quarters[t_demo],
         'metrics': metrics,
     }
+
+
+# ── bbox lookup ────────────────────────────────────────────────────────────────
+
+def _lookup_aoi_bbox(aoi_name: str) -> Optional[List[float]]:
+    """Try config.py for the bbox; return None if not found."""
+    try:
+        from config import AOIS
+        return AOIS.get(aoi_name, {}).get('bbox')
+    except Exception:
+        return None
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
@@ -784,7 +872,11 @@ def parse_args():
     p.add_argument('--aoi',        default=None,
                    help='Single AOI to evaluate (overrides VAL_AOIS). '
                         'Data must exist at <data-root>/<aoi>/. '
+                        'Triggers spot-check site listing. '
                         'Failure demos are skipped when --aoi is set.')
+    p.add_argument('--spot-check-n', type=int, default=5,
+                   help='Number of spot-check sites per class (default 5, '
+                        'only applies in --aoi mode)')
     p.add_argument('--smoke-test', action='store_true',
                    help='Fast run: use sunterra, fewer timepoints')
     p.add_argument('--seed',       type=int, default=42)
@@ -799,7 +891,6 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(FIGURES_DIR, exist_ok=True)
 
-    # ── load checkpoint ────────────────────────────────────────────────────────
     if not os.path.exists(args.ckpt):
         raise FileNotFoundError(
             f'Checkpoint not found: {args.ckpt}\n'
@@ -810,7 +901,6 @@ def main():
     print(f'[eval] Loaded checkpoint from {args.ckpt} (epoch={ckpt["epoch"]}, '
           f'val_loss={ckpt["val_loss"]:.4f})')
 
-    # ── norm stats ─────────────────────────────────────────────────────────────
     norm_stats_path = ckpt.get('norm_stats_path', os.path.join(args.output_dir, 'norm_stats.json'))
     if not os.path.exists(norm_stats_path):
         norm_stats_path = os.path.join(args.output_dir, 'norm_stats.json')
@@ -818,7 +908,6 @@ def main():
         norm_stats = json.load(f)
     print(f'[eval] Using norm stats from {norm_stats_path}')
 
-    # ── rebuild model ──────────────────────────────────────────────────────────
     smoke_test = args.smoke_test
     model = load_model(
         num_frames_max=K,
@@ -835,23 +924,20 @@ def main():
         'val_loss':   ckpt['val_loss'],
     }
 
-    # ── pick AOIs ──────────────────────────────────────────────────────────────
     if smoke_test:
         eval_aois = ['sunterra']
         run_failure_demos = False
     elif args.aoi is not None:
         eval_aois = [args.aoi]
-        # When the user specifies a single AOI, skip failure demos by default —
-        # they want to see metrics on that AOI only.
         run_failure_demos = False
     else:
         eval_aois = VAL_AOIS
         run_failure_demos = True
 
-    wendell_grading_metrics = None   # for failure-demo comparison
+    wendell_grading_metrics = None
 
     for aoi_name in eval_aois:
-        print(f'\n[eval] ════ {aoi_name.upper()} ════')
+        print(f'\n[eval] ==== {aoi_name.upper()} ====')
         data = load_aoi(aoi_name, args.data_root)
         if data is None:
             print(f'[eval] {aoi_name}: skipping (no data).')
@@ -861,20 +947,17 @@ def main():
         quarters = data['quarters']
         label_cube = data['labels'][:]
 
-        # ── (a) tiled inference at every t ─────────────────────────────────
         print(f'[eval] Running causal inference at each t (T={T})...')
         pred_cube = run_tiled_inference(
             model, data, norm_stats, device, t_start=T_MIN,
         )
 
-        # ── per-timepoint metrics ───────────────────────────────────────────
         tp_results = per_timepoint_metrics(pred_cube, label_cube, t_start=T_MIN)
         print(f'[eval] Per-timepoint metrics ({aoi_name}):')
         for r in tp_results:
             print(f'  t={r["t"]} ({quarters[r["t"]]}):')
             print_metrics(r['metrics'], prefix='    ')
 
-        # ── (f) NEW: summary table ready to drop into the report ──────────────
         print_summary_table(tp_results, aoi_name)
 
         eval_results[aoi_name] = {
@@ -884,7 +967,24 @@ def main():
         if aoi_name == 'wendell' and tp_results:
             wendell_grading_metrics = tp_results[-1]['metrics']
 
-        # ── (b) trajectory / progression figures ───────────────────────────
+        # ── (g) spot-check sites — only in --aoi mode ─────────────────────────
+        if args.aoi is not None:
+            bbox = _lookup_aoi_bbox(aoi_name)
+            if bbox is None:
+                print(f'[eval] {aoi_name}: bbox not found in config.AOIS - '
+                      f'skipping spot-check site listing.')
+            else:
+                print_spot_check_sites(
+                    pred_cube=pred_cube,
+                    label_cube=label_cube,
+                    quarters=quarters,
+                    bbox=bbox,
+                    aoi_name=aoi_name,
+                    output_dir=args.output_dir,
+                    t_idx=-1,
+                    n_per_class=args.spot_check_n,
+                )
+
         try:
             save_trajectory_maps(pred_cube, label_cube, quarters, aoi_name, FIGURES_DIR, T_MIN)
             save_per_timepoint_curve(tp_results, aoi_name, FIGURES_DIR)
@@ -894,7 +994,6 @@ def main():
         except Exception as _fig_err:
             print(f'[eval] figure generation failed (non-fatal): {_fig_err}')
 
-        # ── (c) early detection ─────────────────────────────────────────────
         early = compute_early_detection(pred_cube, label_cube, t_start=T_MIN)
         print(f'\n[eval] Early detection ({aoi_name}):')
         print(f'  Early (pixel,t) instances: {early["early_detection_pixel_timesteps"]}')
@@ -908,7 +1007,6 @@ def main():
         except Exception as _fig_err:
             print(f'[eval] early-detection figure failed (non-fatal): {_fig_err}')
 
-        # ── (d) two-tier grading eval ───────────────────────────────────────
         try:
             tier = two_tier_grading_eval(
                 pred_cube, label_cube, quarters, aoi_name, FIGURES_DIR, T_MIN
@@ -925,11 +1023,10 @@ def main():
             'tier2_note':         tier['tier2_note'],
         }
 
-    # ── (e) failure demos ──────────────────────────────────────────────────────
     if run_failure_demos:
         eval_results['failure_demos'] = {}
         for aoi_name in FAILURE_DEMO_AOIS:
-            print(f'\n[eval] ════ FAILURE DEMO: {aoi_name.upper()} ════')
+            print(f'\n[eval] ==== FAILURE DEMO: {aoi_name.upper()} ====')
             result = run_failure_demo(
                 aoi_name, args.data_root, model, norm_stats, device,
                 FIGURES_DIR, wendell_metrics=wendell_grading_metrics,
@@ -940,7 +1037,6 @@ def main():
                     print_metrics(result['metrics'], prefix='  ')
                 eval_results['failure_demos'][aoi_name] = result
 
-    # ── save results ───────────────────────────────────────────────────────────
     results_path = os.path.join(args.output_dir, 'eval_results.json')
 
     def _serialise(obj):
@@ -958,7 +1054,7 @@ def main():
 
     with open(results_path, 'w') as f:
         json.dump(_serialise(eval_results), f, indent=2)
-    print(f'\n[eval] Results saved → {results_path}')
+    print(f'\n[eval] Results saved -> {results_path}')
 
     if smoke_test:
         print('[eval] Smoke test evaluation completed successfully.')
