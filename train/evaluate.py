@@ -784,12 +784,15 @@ def main():
             # Use latest timepoint's grading metrics as baseline for failure demo comparison
             wendell_grading_metrics = tp_results[-1]['metrics']
 
-        # ── (b) trajectory / progression figures ───────────────────────────
-        save_trajectory_maps(pred_cube, label_cube, quarters, aoi_name, FIGURES_DIR, T_MIN)
-        save_per_timepoint_curve(tp_results, aoi_name, FIGURES_DIR)
-        save_sample_pixel_trajectories(
-            pred_cube, label_cube, quarters, aoi_name, FIGURES_DIR, T_MIN
-        )
+        # ── (b) trajectory / progression figures (non-fatal) ───────────────
+        try:
+            save_trajectory_maps(pred_cube, label_cube, quarters, aoi_name, FIGURES_DIR, T_MIN)
+            save_per_timepoint_curve(tp_results, aoi_name, FIGURES_DIR)
+            save_sample_pixel_trajectories(
+                pred_cube, label_cube, quarters, aoi_name, FIGURES_DIR, T_MIN
+            )
+        except Exception as _fig_err:
+            print(f'[eval] figure generation failed (non-fatal): {_fig_err}')
 
         # ── (c) early detection ─────────────────────────────────────────────
         early = compute_early_detection(pred_cube, label_cube, t_start=T_MIN)
@@ -798,10 +801,22 @@ def main():
         print(f'  Confirmed-construction px:  {early["confirmed_construction_pixels"]}')
         print(f'  Early fraction:             {early["early_fraction"]:.3f}')
         eval_results[aoi_name]['early_detection'] = early
-        save_early_detection_examples(pred_cube, label_cube, quarters, aoi_name, FIGURES_DIR, T_MIN)
+        try:
+            save_early_detection_examples(
+                pred_cube, label_cube, quarters, aoi_name, FIGURES_DIR, T_MIN
+            )
+        except Exception as _fig_err:
+            print(f'[eval] early-detection figure failed (non-fatal): {_fig_err}')
 
         # ── (d) two-tier grading eval ───────────────────────────────────────
-        tier = two_tier_grading_eval(pred_cube, label_cube, quarters, aoi_name, FIGURES_DIR, T_MIN)
+        try:
+            tier = two_tier_grading_eval(
+                pred_cube, label_cube, quarters, aoi_name, FIGURES_DIR, T_MIN
+            )
+        except Exception as _fig_err:
+            print(f'[eval] two-tier grading figure failed (non-fatal): {_fig_err}')
+            tier = {'tier1_confirmed_trajectory': [],
+                    'tier2_note': 'figure generation failed'}
         print(f'\n[eval] Two-tier grading eval ({aoi_name}):')
         print(f'  Tier 1 confirmed-trajectory timepoints: {len(tier["tier1_confirmed_trajectory"])}')
         print(f'  {tier["tier2_note"]}')
