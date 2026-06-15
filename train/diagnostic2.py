@@ -59,3 +59,18 @@ missed_grading = (label_cube == 1) & (pred_cube == 0) & valid
 mg = ndvi[missed_grading]; mg = mg[~np.isnan(mg)]
 if len(mg):
     print(f"\n[diag] MISSED-GRADING NDVI: mean={mg.mean():.3f} median={np.median(mg):.3f} (n={len(mg):,})")
+
+
+import numpy as np
+# dw_cube: (T, H, W) with DW classes. You need to know DW's class codes.
+# DW classes: 0=water,1=trees,2=grass,3=flooded_veg,4=crops,5=shrub,6=built,7=bare,8=snow
+dw = np.load('../data/wendell/dw_cube.npy')   # adjust path
+
+# missed = labeled construction but model predicted baseline (from your diagnostic)
+# For those missed pixels, what does DW say at the same (t, pixel)?
+dw_on_missed = dw[missed]   # missed is the (T,H,W) bool from your script
+vals, counts = np.unique(dw_on_missed[~np.isnan(dw_on_missed)], return_counts=True)
+print("DW class distribution on MISSED pixels:")
+dw_names = {0:'water',1:'trees',2:'grass',3:'floodedveg',4:'crops',5:'shrub',6:'BUILT',7:'BARE',8:'snow'}
+for v, c in zip(vals, counts):
+    print(f"  {dw_names.get(int(v), v)}: {c:,} ({100*c/counts.sum():.1f}%)")
