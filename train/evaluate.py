@@ -10,14 +10,14 @@ Produces:
   (e) Failure demos on desert + austin (default run only)
   (f) Summary table of macro-averaged + peak metrics ready to drop into the report
   (g) Spot-check sites — spatially stratified predicted-construction pixels
-      with lat/lon for live demo verification (--aoi mode only)
+      with lat/lon AND inferred onset quarters for live demo verification
+      (--aoi mode only)
 
 Usage:
     # default: evaluate on VAL_AOIS (wendell), run failure demos
     python train/evaluate.py
 
-    # evaluate on a specific AOI (must have spectral_cube.npy + metadata.json;
-    # label_cube.npy optional — metrics skipped if missing)
+    # evaluate on a specific AOI; triggers spot-check site listing
     python train/evaluate.py --aoi lakewood_ranch
     python train/evaluate.py --aoi wendell --device cuda
 
@@ -327,12 +327,19 @@ def print_spot_check_sites(
     pixels at a given timepoint (default: final quarter) for live demo
     verification.
 
-    Spatially stratifies by dividing the AOI into a grid_size × grid_size grid
-    and selecting at most one pixel per grid cell — so the printed sites are
-    spread across the AOI rather than clustering in one subdivision.
+    For each sampled pixel, also infer:
+      - first quarter the model predicted grading (1)
+      - first quarter the model predicted constructed (2)
+      - same for DW labels, if available
 
-    Prints a table (pixel coords, lat/lon, predicted class, DW label if
-    available) to stdout and saves the same content to
+    These onset quarters are what you scrub to in Google Earth historical
+    imagery to verify the prediction is real.
+
+    Spatially stratifies by dividing the AOI into a grid_size x grid_size grid
+    and picking at most one pixel per cell — so the printed sites are spread
+    across the AOI rather than clustering in one subdivision.
+
+    Prints a table to stdout and saves the same content to
     outputs/spot_check_{aoi}.txt.
     """
     T, H, W = pred_cube.shape
@@ -346,10 +353,18 @@ def print_spot_check_sites(
     lon_min, lat_min, lon_max, lat_max = bbox
 
     def pixel_to_lonlat(y: int, x: int) -> Tuple[float, float]:
-        """Pixel (row, col) → (lon, lat). Row 0 is the NORTH edge."""
+        """Pixel (row, col) -> (lon, lat). Row 0 is the NORTH edge."""
         lon = lon_min + (x + 0.5) / W * (lon_max - lon_min)
         lat = lat_max - (y + 0.5) / H * (lat_max - lat_min)
         return lon, lat
+
+    def first_class_quarter(cube: np.ndarray, y: int, x: int, cls: int) -> str:
+        """First quarter where cube[:, y, x] == cls. Returns '-' if never."""
+        traj = cube[:, y, x]
+        hits = np.where(traj == cls)[0]
+        if len(hits) == 0:
+            return '-'
+        return quarters[int(hits[0])]
 
     rng = np.random.default_rng(seed)
 
@@ -378,16 +393,25 @@ def print_spot_check_sites(
     grading_sites     = stratified_sample(pred_t == 1, n_per_class)
     constructed_sites = stratified_sample(pred_t == 2, n_per_class)
 
-    # Build lines (printed AND saved)
+    has_labels = label_cube is not None
+
     lines = []
-    lines.append(f'\n{"="*70}')
+    lines.append(f'\n{"="*110}')
     lines.append(f'SPOT-CHECK SITES — {aoi_name.upper()}')
-    lines.append(f'{"="*70}')
-    lines.append(f'Timepoint: {quarter} (t={t_idx})')
+    lines.append(f'{"="*110}')
+    lines.append(f'Eval timepoint: {quarter} (t={t_idx})')
     lines.append(f'Spatial stratification: {grid_size}x{grid_size} grid '
                  f'(max one pixel per cell)')
     lines.append(f'Found {len(grading_sites)} grading + {len(constructed_sites)} '
                  f'constructed predicted sites')
+    lines.append('')
+    lines.append('"model 1st grad/built": first quarter the model predicted that '
+                 'class at the pixel.')
+    if has_labels:
+        lines.append('"DW 1st grad/built":    first quarter DW labeled that class '
+                     'at the pixel.')
+    lines.append('Use these quarters to scrub Google Earth historical imagery for '
+                 'live verification.')
     lines.append('')
 
     def fmt_section(header: str, sites: List[Tuple[int, int]]):
@@ -395,33 +419,54 @@ def print_spot_check_sites(
         if not sites:
             lines.append('  (no predictions in this class at this timepoint)')
             return
-        if label_t is not None:
-            lines.append(f'  {"#":>3s}  {"pixel(y,x)":>14s}  {"lat":>10s}  {"lon":>11s}  '
-                         f'{"pred":>12s}  {"DW label":>12s}')
+        if has_labels:
+            lines.append(
+                f'  {"#":>3s}  {"pixel(y,x)":>14s}  {"lat":>10s}  {"lon":>11s}  '
+                f'{"pred@t":>12s}  {"DW@t":>12s}  '
+                f'{"model 1st grad":>15s}  {"model 1st built":>16s}  '
+                f'{"DW 1st grad":>13s}  {"DW 1st built":>14s}'
+            )
         else:
-            lines.append(f'  {"#":>3s}  {"pixel(y,x)":>14s}  {"lat":>10s}  {"lon":>11s}  '
-                         f'{"pred":>12s}')
+            lines.append(
+                f'  {"#":>3s}  {"pixel(y,x)":>14s}  {"lat":>10s}  {"lon":>11s}  '
+                f'{"pred@t":>12s}  '
+                f'{"model 1st grad":>15s}  {"model 1st built":>16s}'
+            )
+
         for i, (y, x) in enumerate(sites, start=1):
             lon, lat = pixel_to_lonlat(y, x)
             pred_name = CLASS_NAMES.get(int(pred_t[y, x]), f'cls{int(pred_t[y, x])}')
-            if label_t is not None:
+
+            model_1st_grad  = first_class_quarter(pred_cube,  y, x, 1)
+            model_1st_built = first_class_quarter(pred_cube,  y, x, 2)
+
+            if has_labels:
                 lbl_val = int(label_t[y, x])
                 if lbl_val == IGNORE_LABEL:
                     lbl_name = 'ignore'
                 else:
                     lbl_name = CLASS_NAMES.get(lbl_val, f'cls{lbl_val}')
-                lines.append(f'  {i:>3d}  ({y:>4d},{x:>4d})  '
-                             f'{lat:>10.5f}  {lon:>11.5f}  '
-                             f'{pred_name:>12s}  {lbl_name:>12s}')
+                dw_1st_grad  = first_class_quarter(label_cube, y, x, 1)
+                dw_1st_built = first_class_quarter(label_cube, y, x, 2)
+                lines.append(
+                    f'  {i:>3d}  ({y:>4d},{x:>4d})  '
+                    f'{lat:>10.5f}  {lon:>11.5f}  '
+                    f'{pred_name:>12s}  {lbl_name:>12s}  '
+                    f'{model_1st_grad:>15s}  {model_1st_built:>16s}  '
+                    f'{dw_1st_grad:>13s}  {dw_1st_built:>14s}'
+                )
             else:
-                lines.append(f'  {i:>3d}  ({y:>4d},{x:>4d})  '
-                             f'{lat:>10.5f}  {lon:>11.5f}  '
-                             f'{pred_name:>12s}')
+                lines.append(
+                    f'  {i:>3d}  ({y:>4d},{x:>4d})  '
+                    f'{lat:>10.5f}  {lon:>11.5f}  '
+                    f'{pred_name:>12s}  '
+                    f'{model_1st_grad:>15s}  {model_1st_built:>16s}'
+                )
 
     fmt_section('GRADING (predicted=1)', grading_sites)
     lines.append('')
     fmt_section('CONSTRUCTED (predicted=2)', constructed_sites)
-    lines.append(f'{"="*70}')
+    lines.append(f'{"="*110}')
 
     text = '\n'.join(lines) + '\n'
     print(text)
