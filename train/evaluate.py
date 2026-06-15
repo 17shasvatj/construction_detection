@@ -50,7 +50,7 @@ except ImportError:
     print('[eval] WARNING: matplotlib not available — figures will be skipped.')
 
 # ── constants ──────────────────────────────────────────────────────────────────
-DATA_ROOT  = 'data'
+DATA_ROOT  = '../data'
 OUTPUT_DIR = 'outputs'
 CKPT_DIR   = 'checkpoints'
 FIGURES_DIR = os.path.join(OUTPUT_DIR, 'figures')
