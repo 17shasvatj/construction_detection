@@ -1,6 +1,7 @@
 """
-Shared utilities for Google Earth spot-check of construction-detection labels/predictions.
-Imported by validate_labels.py and make_demo.py — no CLI, no side effects.
+Shared utilities for Google Earth spot-check of construction-detection
+labels/predictions. Imported by validate_labels.py and make_demo.py — no CLI,
+no side effects.
 """
 
 import json
@@ -23,7 +24,7 @@ LABEL_NAMES = {0: 'baseline', 1: 'grading', 2: 'built', 255: 'excluded'}
 
 def load_aoi(aoi: str, data_root: str = 'data') -> dict:
     """
-    Load AOI data from data/{aoi}/.
+    Load AOI data from {data_root}/{aoi}/.
 
     Returns dict with keys:
       meta, quarters, bbox ([lon_min, lat_min, lon_max, lat_max]), H, W, T,
@@ -34,7 +35,10 @@ def load_aoi(aoi: str, data_root: str = 'data') -> dict:
     aoi_dir = Path(data_root) / aoi
     meta_path = aoi_dir / 'metadata.json'
     if not meta_path.exists():
-        available = [p.name for p in Path(data_root).iterdir() if p.is_dir()] if Path(data_root).exists() else []
+        available = (
+            [p.name for p in Path(data_root).iterdir() if p.is_dir()]
+            if Path(data_root).exists() else []
+        )
         raise FileNotFoundError(
             f"No metadata.json at {meta_path}.\n"
             f"Available AOIs under {data_root}/: {available}"
@@ -69,8 +73,7 @@ def load_aoi(aoi: str, data_root: str = 'data') -> dict:
 def pixel_to_lonlat(y: int, x: int, bbox: list, H: int, W: int):
     """
     Convert pixel (row=y, col=x) to (lon, lat) at pixel centre.
-    Formula verified against overpass_validation.py and original spot_check.py.
-    bbox = [lon_min, lat_min, lon_max, lat_max]
+    bbox = [lon_min, lat_min, lon_max, lat_max].
     """
     lon = bbox[0] + (x + 0.5) / W * (bbox[2] - bbox[0])
     lat = bbox[3] - (y + 0.5) / H * (bbox[3] - bbox[1])
@@ -85,16 +88,17 @@ def earth_url(lat: float, lon: float) -> str:
 
 # ── Trajectory string ──────────────────────────────────────────────────────────
 
-def dw_trajectory(cube: np.ndarray, y: int, x: int, names: dict = None) -> str:
+def dw_trajectory(cube: np.ndarray, y: int, x: int, names: dict) -> str:
     """
     Collapsed trajectory at pixel (y, x) from a (T, H, W) cube.
-    Consecutive duplicate labels are collapsed: [1,1,7,7,6] → 'trees→bare→built'.
-    names defaults to DW_NAMES if cube values are in 0-8, else LABEL_NAMES.
-    """
-    seq = cube[:, y, x].tolist()
-    if names is None:
-        names = DW_NAMES if set(seq) <= set(DW_NAMES) else LABEL_NAMES
+    Consecutive duplicate labels are collapsed: [1,1,7,7,6] -> 'trees->bare->built'.
 
+    `names` is REQUIRED — pass DW_NAMES for a DW cube, LABEL_NAMES for a label cube.
+    """
+    if names is None:
+        raise ValueError("dw_trajectory: `names` is required (pass DW_NAMES or LABEL_NAMES).")
+
+    seq = cube[:, y, x].tolist()
     collapsed = [seq[0]]
     for v in seq[1:]:
         if v != collapsed[-1]:
@@ -103,13 +107,31 @@ def dw_trajectory(cube: np.ndarray, y: int, x: int, names: dict = None) -> str:
     return '→'.join(names.get(v, str(v)) for v in collapsed)
 
 
+# ── Confirmed-trajectory transition quarters ───────────────────────────────────
+
+def label_transitions(label_cube: np.ndarray, y: int, x: int, quarters: list):
+    """
+    For a confirmed-trajectory pixel (passes through both label==1 and label==2),
+    return (grading_onset_quarter, built_onset_quarter) — the quarter strings at
+    which the pixel first entered grading and first entered built.
+
+    Returns (None, None) if the pixel never entered grading or never entered built.
+    """
+    series = label_cube[:, y, x]
+    g_idx = np.where(series == 1)[0]
+    b_idx = np.where(series == 2)[0]
+    g_onset = quarters[int(g_idx[0])] if len(g_idx) else None
+    b_onset = quarters[int(b_idx[0])] if len(b_idx) else None
+    return g_onset, b_onset
+
+
 # ── Stratified spatial sampling ────────────────────────────────────────────────
 
 def stratified_sample(mask: np.ndarray, n: int, seed: int = 42) -> list:
     """
-    Sample up to n (y, x) positions from a boolean mask, spread across a 4×4 spatial grid.
-    Returns a list of (y, x) tuples in stable top-left→bottom-right scan order.
-    If fewer than n pixels exist in the mask, returns all of them.
+    Sample up to n (y, x) positions from a boolean mask, spread across a 4x4
+    spatial grid. Returns a list of (y, x) tuples in stable top-left ->
+    bottom-right scan order. If fewer than n pixels exist, returns all of them.
     """
     rng = np.random.default_rng(seed)
     H, W = mask.shape
@@ -139,7 +161,30 @@ def stratified_sample(mask: np.ndarray, n: int, seed: int = 42) -> list:
     return sites
 
 
-# ── Row formatter ──────────────────────────────────────────────────────────────
+# ── Row formatters ─────────────────────────────────────────────────────────────
 
-def format_row(idx: int, class_name: str, lat: float, lon: float, traj: str, url: str) -> str:
-    return f"[{idx:02d}] {class_name:<12} | {lat:.4f}, {lon:.4f} | {traj} | {url}"
+def format_row(
+    idx: int,
+    class_name: str,
+    lat: float,
+    lon: float,
+    dw_traj: str,
+    url: str,
+    label_transitions_str: str = None,
+) -> str:
+    """
+    Format one spot-check row. If label_transitions_str is provided (e.g.
+    'grading: 2022-Q4 -> built: 2024-Q2'), it is included; otherwise the row
+    falls back to the simpler 4-field layout used by demo / prediction sites.
+    """
+    base = f"[{idx:02d}] {class_name:<12} | {lat:.4f}, {lon:.4f} | DW: {dw_traj}"
+    if label_transitions_str:
+        return f"{base} | {label_transitions_str} | {url}"
+    return f"{base} | {url}"
+
+
+def format_label_transitions(grading_onset: str, built_onset: str) -> str:
+    """Pretty-printer for the (g_onset, b_onset) pair from label_transitions()."""
+    g = grading_onset if grading_onset else '—'
+    b = built_onset   if built_onset   else '—'
+    return f"grading: {g} → built: {b}"

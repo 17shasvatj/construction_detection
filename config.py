@@ -13,16 +13,22 @@ AOIS = {
     },
     "sunterra": {
         "name": "Sunterra, Katy TX",
-        "bbox": None,
+        "bbox": [-95.90, 29.82, -95.85, 29.86],
         "biome": "gulf_prairie",
         "role": "train",
     },
-    "canebay": {
-        "name": "Cane Bay, Charleston SC",
-        "bbox": None,
-        "biome": "lowcountry_forest",
+   "santa_rita_ranch": {
+       "name": "Santa Rita Ranch, Liberty Hill TX",
+       "bbox": [-97.9330, 30.6463, -97.8830, 30.6963],
+       "biome": "hill_country_oak_savanna",
+        "role": "train",
+   },
+    "celina": {
+        "name": "Celina, TX",
+        "bbox": [-96.78, 33.32, -96.73, 33.36],  # shifted east,
+        "biome": "north_texas_prairie",
         "role": "validation",
-    },
+   },
     "desert": {
         "name": "Teravalis, Buckeye AZ",
         "bbox": None,
