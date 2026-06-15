@@ -2,17 +2,24 @@
 Evaluation script for the trained construction-detection model.
 
 Produces:
-  (a) Per-timepoint metrics on wendell (held-out transfer)
-  (b) Progression / trajectory maps (predicted class timeline per pixel)
+  (a) Per-timepoint metrics on a held-out AOI
+  (b) Progression / trajectory maps (predicted vs DW labels per quarter)
   (c) Non-circularity / early-detection count (model predicts before DW label)
-  (d) Two-tier grading eval (quantitative for confirmed trajectories; qualitative only
-      for active-grading pixels — no precision number is possible, stated explicitly)
-  (e) Failure demos on desert + austin
+  (d) Two-tier grading eval (quantitative for confirmed trajectories; qualitative-only
+      for active-grading pixels — no precision number, stated explicitly)
+  (e) Failure demos on desert + austin (optional)
+  (f) Summary table of macro-averaged + peak metrics ready to drop into the report
 
 Usage:
-    python train/evaluate.py                      # uses checkpoints/best.pt
-    python train/evaluate.py --smoke-test         # fast run on sunterra
-    python train/evaluate.py --ckpt path/to.pt --device cuda
+    # default: evaluate on VAL_AOIS (wendell)
+    python train/evaluate.py
+
+    # evaluate on a specific AOI (must have spectral_cube.npy + label_cube.npy)
+    python train/evaluate.py --aoi lakewood_ranch
+    python train/evaluate.py --aoi wendell --device cuda
+
+    # smoke-test (sunterra, no failure demos)
+    python train/evaluate.py --smoke-test
 """
 
 import argparse
@@ -61,7 +68,9 @@ FAILURE_DEMO_AOIS = ['desert', 'austin']
 NUM_CLASSES = 3
 CLASS_NAMES = {0: 'baseline', 1: 'grading', 2: 'constructed'}
 
-# RGB colours for prediction maps
+# RGB colours for prediction maps. Use np.array so /255. broadcasts correctly
+# (this was the cause of the "unsupported operand type(s) for /: 'list' and 'float'"
+# error — Python lists don't divide).
 CLASS_COLORS = np.array([
     [0,   180,  0],    # 0 baseline  → green
     [255, 165,  0],    # 1 grading   → orange
@@ -197,10 +206,8 @@ def per_timepoint_metrics(
         preds_valid  = preds[mask]
         labels_valid = labels[mask]
 
-        # Per-class metrics
         class_metrics = compute_per_class_metrics(preds_valid, labels_valid)
 
-        # Confusion matrix (3×3, ignoring 255)
         confusion = np.zeros((NUM_CLASSES, NUM_CLASSES), dtype=np.int64)
         for true_c in range(NUM_CLASSES):
             for pred_c in range(NUM_CLASSES):
@@ -216,6 +223,119 @@ def per_timepoint_metrics(
         })
 
     return results
+
+
+# ── summary table for the report ───────────────────────────────────────────────
+
+def print_summary_table(
+    tp_results: List[Dict],
+    aoi_name: str,
+):
+    """
+    Print the macro-averaged + peak per-class metrics in a format ready to drop
+    into the report. Skips all-zero timepoints (lacking K-frame history).
+    Grading is averaged over t where it has positive support (excludes
+    structural-zero endpoints where ground truth has relabeled to constructed).
+    """
+    # Filter out timepoints where ALL classes are zero (insufficient history)
+    valid = [
+        r for r in tp_results
+        if any(r['metrics'].get(c, {}).get('f1', 0.0) > 0 or
+               r['metrics'].get(c, {}).get('precision', 0.0) > 0 or
+               r['metrics'].get(c, {}).get('recall', 0.0) > 0
+               for c in [0, 1, 2])
+    ]
+    if not valid:
+        print(f'\n[eval] {aoi_name}: no valid timepoints for summary.')
+        return
+
+    print(f'\n{"="*70}')
+    print(f'SUMMARY METRICS FOR REPORT — {aoi_name.upper()}')
+    print(f'{"="*70}')
+    print(f'Eval timepoints: t={valid[0]["t"]} ({valid[0]["t"]}) → t={valid[-1]["t"]} '
+          f'(n={len(valid)} timepoints)')
+    print()
+
+    # Macro-averages
+    print(f'MACRO-AVERAGES ACROSS VALID TIMEPOINTS')
+    print(f'  {"class":<14s} {"P":>7s} {"R":>7s} {"F1":>7s} {"IoU":>7s} {"n_t":>5s}')
+    print(f'  {"-"*14} {"-"*7} {"-"*7} {"-"*7} {"-"*7} {"-"*5}')
+    for c in [0, 1, 2]:
+        # For class c, include only timepoints where it has positive support
+        # (avoids structural-zero rows where labels=0 for that class)
+        rows = [
+            r for r in valid
+            if r['metrics'].get(c, {}).get('tp', 0) + r['metrics'].get(c, {}).get('fn', 0) > 0
+        ]
+        if not rows:
+            print(f'  {CLASS_NAMES[c]:<14s} {"n/a":>7s} {"n/a":>7s} {"n/a":>7s} {"n/a":>7s} {0:>5d}')
+            continue
+        ps  = [r['metrics'][c]['precision'] for r in rows]
+        rs  = [r['metrics'][c]['recall']    for r in rows]
+        f1s = [r['metrics'][c]['f1']        for r in rows]
+        ious= [r['metrics'][c]['iou']       for r in rows]
+        print(f'  {CLASS_NAMES[c]:<14s} '
+              f'{np.mean(ps):>7.3f} {np.mean(rs):>7.3f} '
+              f'{np.mean(f1s):>7.3f} {np.mean(ious):>7.3f} '
+              f'{len(rows):>5d}')
+
+    # Peaks
+    print()
+    print(f'PEAK F1 PER CLASS (best single timepoint)')
+    print(f'  {"class":<14s} {"peak F1":>9s} {"@ t":>5s} {"P":>7s} {"R":>7s}')
+    print(f'  {"-"*14} {"-"*9} {"-"*5} {"-"*7} {"-"*7}')
+    for c in [0, 1, 2]:
+        rows = [r for r in valid if r['metrics'].get(c, {}).get('f1', 0) > 0]
+        if not rows:
+            print(f'  {CLASS_NAMES[c]:<14s} {"n/a":>9s}')
+            continue
+        best = max(rows, key=lambda r: r['metrics'][c]['f1'])
+        m = best['metrics'][c]
+        print(f'  {CLASS_NAMES[c]:<14s} '
+              f'{m["f1"]:>9.3f} {best["t"]:>5d} '
+              f'{m["precision"]:>7.3f} {m["recall"]:>7.3f}')
+
+    # Recall-vs-history (constructed) — architecture-working evidence
+    print()
+    print(f'CONSTRUCTED RECALL vs HISTORY LENGTH (architecture validation)')
+    cons_rows = [r for r in valid if r['metrics'].get(2, {}).get('recall', 0) > 0]
+    if cons_rows:
+        # Print early, middle, late
+        n = len(cons_rows)
+        snapshot_idxs = [0, n // 4, n // 2, (3 * n) // 4, n - 1]
+        snapshot_idxs = sorted(set(snapshot_idxs))
+        print(f'  {"t":>4s} {"R(constructed)":>16s}')
+        for i in snapshot_idxs:
+            r = cons_rows[i]
+            print(f'  {r["t"]:>4d} {r["metrics"][2]["recall"]:>16.3f}')
+
+    # Final-quarter metrics for persistent classes
+    print()
+    print(f'FINAL-QUARTER METRICS (persistent classes)')
+    last = valid[-1]
+    print(f'  t={last["t"]}')
+    for c in [0, 2]:  # skip grading (structural zero at endpoint)
+        m = last['metrics'].get(c, {})
+        if m.get('precision', 0) + m.get('recall', 0) > 0:
+            print(f'  {CLASS_NAMES[c]:<14s} P={m["precision"]:.3f}  '
+                  f'R={m["recall"]:.3f}  F1={m["f1"]:.3f}  IoU={m["iou"]:.3f}')
+
+    # Mid-trajectory grading (where ground truth is populated)
+    grad_rows = [r for r in valid
+                 if r['metrics'].get(1, {}).get('tp', 0) + r['metrics'].get(1, {}).get('fn', 0) > 100]
+    if grad_rows:
+        print()
+        print(f'MID-TRAJECTORY GRADING (timepoints with >100 ground-truth grading px)')
+        ps = [r['metrics'][1]['precision'] for r in grad_rows]
+        rs = [r['metrics'][1]['recall']    for r in grad_rows]
+        f1s= [r['metrics'][1]['f1']        for r in grad_rows]
+        print(f'  range: P {min(ps):.2f}–{max(ps):.2f}, '
+              f'R {min(rs):.2f}–{max(rs):.2f}, '
+              f'F1 {min(f1s):.2f}–{max(f1s):.2f}')
+        print(f'  mean : P={np.mean(ps):.3f}  '
+              f'R={np.mean(rs):.3f}  F1={np.mean(f1s):.3f}')
+
+    print(f'{"="*70}\n')
 
 
 # ── (b) trajectory / progression figures ──────────────────────────────────────
@@ -261,8 +381,10 @@ def save_trajectory_maps(
         for row in range(rows):
             axes[row, col_i].axis('off')
 
+    # BUG FIX: wrap each color in np.array so /255. broadcasts properly.
+    # Python lists don't support / with a scalar — that was the runtime error.
     from matplotlib.patches import Patch
-    legend = [Patch(color=c/255., label=l) for c, l in [
+    legend = [Patch(color=np.array(c) / 255., label=l) for c, l in [
         ([0, 180, 0],   'baseline'),
         ([255, 165, 0], 'grading'),
         ([200, 0, 0],   'constructed'),
@@ -292,7 +414,6 @@ def save_sample_pixel_trajectories(
         return
     T, H, W = label_cube.shape
 
-    # Select pixels that have confirmed transitions (0→1→2)
     has_grading = np.any(label_cube == 1, axis=0)
     has_built   = np.any(label_cube == 2, axis=0)
     candidate   = has_grading & has_built
@@ -377,15 +498,12 @@ def compute_early_detection(
     t_start: int,
 ) -> Dict:
     """
-    Find pixels where the model predicts construction (1 or 2) before the DW
-    label reaches construction, AND the pixel is confirmed construction by
-    its full trajectory.
-
-    Returns count + pixel fraction for reporting.
+    Count (pixel, t) instances where model predicts grading/built while DW
+    label is still baseline, for pixels whose full trajectory confirms
+    construction. Non-circular detection beyond the DW label source.
     """
     T, H, W = label_cube.shape
 
-    # Confirmed construction pixels: label eventually reaches 2
     ever_built = np.any(label_cube == 2, axis=0)   # (H, W) bool
 
     early_count = 0
@@ -395,7 +513,6 @@ def compute_early_detection(
         pred  = pred_cube[t]
         label = label_cube[t]
 
-        # Model predicts construction (grading=1 or built=2), DW still baseline (0)
         model_detects = (pred == 1) | (pred == 2)
         dw_baseline   = label == 0
         confirmed     = ever_built
@@ -430,7 +547,6 @@ def save_early_detection_examples(
     T, H, W = label_cube.shape
     ever_built = np.any(label_cube == 2, axis=0)
 
-    # Find pixels with at least one early-detection timestep
     candidates = []
     for t in range(t_start, T):
         early_mask = ((pred_cube[t] == 1) | (pred_cube[t] == 2)) & (label_cube[t] == 0) & ever_built
@@ -444,7 +560,6 @@ def save_early_detection_examples(
         print(f'[eval] {aoi_name}: no early-detection pixels found.')
         return
 
-    rng = np.random.default_rng(42)
     seen = set()
     unique = []
     for hw in candidates:
@@ -460,7 +575,6 @@ def save_early_detection_examples(
     for ax, (h, w) in zip(axes[:, 0], chosen):
         pred_traj  = [int(pred_cube[t, h, w])  for t in t_range]
         label_traj = [int(label_cube[t, h, w]) for t in t_range]
-        # Highlight early-detection steps
         early_steps = [
             i for i, t in enumerate(t_range)
             if (pred_cube[t, h, w] in (1, 2)) and (label_cube[t, h, w] == 0)
@@ -499,20 +613,12 @@ def two_tier_grading_eval(
     figures_dir: str,
     t_start: int,
 ) -> Dict:
-    """
-    Tier 1 (quantitative): pixels with a confirmed veg→bare→built trajectory.
-      - Metrics on these pixels only, per timepoint.
-
-    Tier 2 (qualitative, NO precision): pixels with current label=1 (grading)
-      that have NOT yet reached label=2 in their full trajectory.
-      - Map only, with explicit disclaimer.
-    """
+    """Tier 1: metrics on confirmed-trajectory pixels. Tier 2: map of active grading."""
     T, H, W = label_cube.shape
     ever_built = np.any(label_cube == 2, axis=0)
     ever_bare  = np.any(label_cube == 1, axis=0)
 
-    # Confirmed-trajectory mask: ever reached grading AND eventually built
-    confirmed_mask = ever_bare & ever_built   # (H, W)
+    confirmed_mask = ever_bare & ever_built
 
     tier1_results = []
     for t in range(t_start, T):
@@ -526,10 +632,8 @@ def two_tier_grading_eval(
         m = compute_per_class_metrics(preds[mask].ravel(), labels[mask].ravel())
         tier1_results.append({'t': t, 'metrics': m, 'n_pixels': int(mask.sum())})
 
-    # Tier 2 map: currently grading (label=1), never confirmed built
     active_grading_maps = {}
     if HAS_MPL:
-        # Save one map at the latest t with significant active grading
         for t in range(T - 1, t_start - 1, -1):
             active = (label_cube[t] == 1) & ~ever_built
             if active.sum() > 50:
@@ -539,7 +643,6 @@ def two_tier_grading_eval(
                 disp[pred_cube[t] == 1] = [255, 165, 0]
                 disp[pred_cube[t] == 2] = [200, 0, 0]
                 ax.imshow(disp)
-                # Overlay active-grading pixels
                 ay, ax_ = np.where(active)
                 ax.scatter(ax_, ay, c='cyan', s=1, marker='.', label='active grading')
                 ax.set_title(
@@ -575,7 +678,6 @@ def resolve_failure_aoi_dir(aoi_name: str, data_root: str) -> Optional[str]:
     standard = os.path.join(data_root, aoi_name)
     if os.path.exists(os.path.join(standard, 'spectral_cube.npy')):
         return standard
-    # Fallback: {aoi}_data/ at project root (one level up from data_root)
     project_root = os.path.dirname(os.path.abspath(data_root))
     alt = os.path.join(project_root, f'{aoi_name}_data')
     if os.path.exists(os.path.join(alt, 'spectral_cube.npy')):
@@ -592,49 +694,34 @@ def run_failure_demo(
     figures_dir: str,
     wendell_metrics: Optional[Dict] = None,
 ) -> Optional[Dict]:
-    """
-    Run inference on a failure-demo AOI (OOD climate/geography).
-    Reports at the latest available t. Compares to wendell baseline if provided.
-    """
+    """Run inference on a failure-demo AOI; compare to wendell baseline if provided."""
     aoi_dir = resolve_failure_aoi_dir(aoi_name, data_root)
     if aoi_dir is None:
-        print(f'[eval] {aoi_name}: no data found (checked data/{aoi_name}/ and {aoi_name}_data/). Skipping.')
+        print(f'[eval] {aoi_name}: no data found. Skipping.')
         return None
 
-    # Load from resolved dir (may differ from standard layout)
     data = load_aoi(aoi_name, aoi_dir.replace(f'/{aoi_name}', ''))
     if data is None:
-        # Fallback: load directly if dir isn't under data_root
-        import importlib
-        ds_mod = importlib.import_module('train.dataset')
-        data = ds_mod.load_aoi.__wrapped__(aoi_name, aoi_dir) if hasattr(
-            ds_mod.load_aoi, '__wrapped__') else None
-        if data is None:
-            # Direct load
-            import json as _json
-            sp = os.path.join(aoi_dir, 'spectral_cube.npy')
-            lb = os.path.join(aoi_dir, 'label_cube.npy')
-            mt = os.path.join(aoi_dir, 'metadata.json')
-            if not all(os.path.exists(p) for p in [sp, lb, mt]):
-                print(f'[eval] {aoi_name}: incomplete data in {aoi_dir}. Skipping.')
-                return None
-            with open(mt) as f:
-                meta = _json.load(f)
-            quarters = meta['quarters']
-            T = len(quarters)
-            spectral = np.load(sp, mmap_mode='r')
-            labels   = np.load(lb, mmap_mode='r')
-            dates    = np.array([quarter_to_doy(q) for q in quarters], dtype=np.float32)
-            nan_flag = np.any(np.isnan(np.array(spectral)), axis=1)
-            H, W     = spectral.shape[2], spectral.shape[3]
-            data = {'spectral': spectral, 'labels': labels, 'dates': dates,
-                    'nan_flag': nan_flag, 'quarters': quarters, 'T': T, 'H': H, 'W': W}
-
-    if data is None:
-        return None
+        # Direct load fallback
+        sp = os.path.join(aoi_dir, 'spectral_cube.npy')
+        lb = os.path.join(aoi_dir, 'label_cube.npy')
+        mt = os.path.join(aoi_dir, 'metadata.json')
+        if not all(os.path.exists(p) for p in [sp, lb, mt]):
+            print(f'[eval] {aoi_name}: incomplete data in {aoi_dir}. Skipping.')
+            return None
+        with open(mt) as f:
+            meta = json.load(f)
+        quarters = meta['quarters']
+        T = len(quarters)
+        spectral = np.load(sp, mmap_mode='r')
+        labels   = np.load(lb, mmap_mode='r')
+        dates    = np.array([quarter_to_doy(q) for q in quarters], dtype=np.float32)
+        nan_flag = np.any(np.isnan(np.array(spectral)), axis=1)
+        H, W     = spectral.shape[2], spectral.shape[3]
+        data = {'spectral': spectral, 'labels': labels, 'dates': dates,
+                'nan_flag': nan_flag, 'quarters': quarters, 'T': T, 'H': H, 'W': W}
 
     T = data['T']
-    # Use second-to-last t to ensure at least T_MIN input frames
     t_demo = max(T_MIN, T - 2)
     quarters = data['quarters']
 
@@ -649,7 +736,6 @@ def run_failure_demo(
     )
     label = data['labels'][t_demo]
 
-    # Metrics (if labels exist)
     mask   = label != IGNORE_LABEL
     metrics = None
     if mask.sum() > 0:
@@ -657,7 +743,6 @@ def run_failure_demo(
         if len(valid_classes) > 0:
             metrics = compute_per_class_metrics(pred[mask].ravel(), label[mask].ravel())
 
-    # Figure: predicted map
     if HAS_MPL:
         fig, axes = plt.subplots(1, 2, figsize=(10, 4))
         axes[0].imshow(_class_to_rgb(pred))
@@ -668,7 +753,6 @@ def run_failure_demo(
         axes[1].axis('off')
 
         if wendell_metrics and metrics:
-            # Annotate degradation
             w_f1 = wendell_metrics.get(1, {}).get('f1', float('nan'))
             d_f1 = metrics.get(1, {}).get('f1', float('nan'))
             fig.text(0.5, 0.01,
@@ -697,6 +781,10 @@ def parse_args():
     p.add_argument('--device',     default=os.environ.get('DEVICE', 'cpu'))
     p.add_argument('--data-root',  default=DATA_ROOT)
     p.add_argument('--output-dir', default=OUTPUT_DIR)
+    p.add_argument('--aoi',        default=None,
+                   help='Single AOI to evaluate (overrides VAL_AOIS). '
+                        'Data must exist at <data-root>/<aoi>/. '
+                        'Failure demos are skipped when --aoi is set.')
     p.add_argument('--smoke-test', action='store_true',
                    help='Fast run: use sunterra, fewer timepoints')
     p.add_argument('--seed',       type=int, default=42)
@@ -747,8 +835,18 @@ def main():
         'val_loss':   ckpt['val_loss'],
     }
 
-    # ── held-out AOIs (or smoke-test on sunterra) ──────────────────────────────
-    eval_aois = ['sunterra'] if smoke_test else VAL_AOIS
+    # ── pick AOIs ──────────────────────────────────────────────────────────────
+    if smoke_test:
+        eval_aois = ['sunterra']
+        run_failure_demos = False
+    elif args.aoi is not None:
+        eval_aois = [args.aoi]
+        # When the user specifies a single AOI, skip failure demos by default —
+        # they want to see metrics on that AOI only.
+        run_failure_demos = False
+    else:
+        eval_aois = VAL_AOIS
+        run_failure_demos = True
 
     wendell_grading_metrics = None   # for failure-demo comparison
 
@@ -761,7 +859,7 @@ def main():
 
         T        = data['T']
         quarters = data['quarters']
-        label_cube = data['labels'][:]   # fully load for metrics
+        label_cube = data['labels'][:]
 
         # ── (a) tiled inference at every t ─────────────────────────────────
         print(f'[eval] Running causal inference at each t (T={T})...')
@@ -776,15 +874,17 @@ def main():
             print(f'  t={r["t"]} ({quarters[r["t"]]}):')
             print_metrics(r['metrics'], prefix='    ')
 
+        # ── (f) NEW: summary table ready to drop into the report ──────────────
+        print_summary_table(tp_results, aoi_name)
+
         eval_results[aoi_name] = {
             'per_timepoint': tp_results,
         }
 
         if aoi_name == 'wendell' and tp_results:
-            # Use latest timepoint's grading metrics as baseline for failure demo comparison
             wendell_grading_metrics = tp_results[-1]['metrics']
 
-        # ── (b) trajectory / progression figures (non-fatal) ───────────────
+        # ── (b) trajectory / progression figures ───────────────────────────
         try:
             save_trajectory_maps(pred_cube, label_cube, quarters, aoi_name, FIGURES_DIR, T_MIN)
             save_per_timepoint_curve(tp_results, aoi_name, FIGURES_DIR)
@@ -826,7 +926,7 @@ def main():
         }
 
     # ── (e) failure demos ──────────────────────────────────────────────────────
-    if not smoke_test:
+    if run_failure_demos:
         eval_results['failure_demos'] = {}
         for aoi_name in FAILURE_DEMO_AOIS:
             print(f'\n[eval] ════ FAILURE DEMO: {aoi_name.upper()} ════')
