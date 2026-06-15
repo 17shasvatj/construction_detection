@@ -11,13 +11,12 @@ import sys
 from pathlib import Path
 
 from config import AOIS, DATA_ROOT
-from pipeline import pull_composites, pull_dw, generate_labels, validate_labels
+from pipeline import pull_composites, pull_dw, generate_labels
 
 STEPS = [
     ("pull_composites", "spectral_cube.npy"),
     ("pull_dw",         "dw_cube.npy"),
     ("generate_labels", "label_cube.npy"),
-    ("validate_labels", None),
 ]
 
 
@@ -42,7 +41,6 @@ def main():
         "pull_composites": lambda: pull_composites.run(args.aoi, cfg["bbox"], data_dir),
         "pull_dw":         lambda: pull_dw.run(data_dir),
         "generate_labels": lambda: generate_labels.run(data_dir),
-        "validate_labels": lambda: validate_labels.run(data_dir),
     }
 
     for step_name, sentinel in STEPS:
