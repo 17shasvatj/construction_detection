@@ -138,31 +138,41 @@ outputs/norm_stats.json      Per-band mean/std used for normalization
 
 ## Step 3 — Evaluate
 
-Loads `checkpoints/best.pt` and runs tiled inference across all evaluation AOIs.
+Loads checkpoints/best.pt and runs tiled inference on the held-out
+evaluation AOIs (default: wendell). Use --aoi to evaluate any AOI
+with prepared data.
 
-```bash
 python train/evaluate.py --device cuda --data-root data
-```
+python train/evaluate.py --aoi lakewood_ranch --device cuda --data-root data
 
-**Key options:**
+Key options:
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--ckpt` | `checkpoints/best.pt` | Checkpoint to load |
-| `--device` | `cpu` (or `$DEVICE`) | `cpu` or `cuda` |
-| `--data-root` | `../data` | Path to `data/` directory |
-| `--output-dir` | `outputs` | Where results and figures go |
-| `--smoke-test` | off | Fast run on sunterra only |
+Flag           Default                Description
+--ckpt         checkpoints/best.pt    Checkpoint to load
+--device       cpu (or $DEVICE)       cpu or cuda
+--data-root    ../data                Path to data/ directory
+--output-dir   outputs                Where results and figures go
+--aoi          (none)                 Evaluate a single AOI (overrides VAL_AOIS;
+                                      data/<aoi>/ must contain spectral_cube.npy,
+                                      label_cube.npy, metadata.json). Failure
+                                      demos are skipped when --aoi is set.
+--smoke-test   off                    Fast run on sunterra only
 
-**Outputs:**
-```
-outputs/eval_results.json          Per-timepoint P/R/F1/IoU for all AOIs
-outputs/figures/
-  {aoi}_trajectory_maps.png        Per-pixel predicted class over time
-  {aoi}_per_timepoint_curve.png    Accuracy vs history length
-  {aoi}_pixel_trajectories.png     Sample pixel class timelines
-  {aoi}_early_detection.png        Pixels predicted before DW confirms construction
-  {aoi}_active_grading.png         Active-grading map (qualitative only, no precision)
+Console output:
+  Per-timepoint P/R/F1/IoU per class, followed by a summary table
+  with macro-averages, peak F1 per class, recall-vs-history
+  snapshots, final-quarter persistent-class metrics, and
+  mid-trajectory grading range (ready to drop into the report).
+
+Outputs:
+  outputs/eval_results.json          Per-timepoint P/R/F1/IoU for all eval AOIs
+  outputs/figures/
+    {aoi}_trajectory_maps.png        Predicted vs DW label maps per quarter
+    {aoi}_per_timepoint_curve.png    F1/IoU vs history length
+    {aoi}_pixel_trajectories.png     Sample pixel class timelines (model vs DW)
+    {aoi}_early_detection.png        Pixels predicted before DW confirms built
+    {aoi}_active_grading_t{t}.png    Active-grading qualitative map (no precision)
+    {aoi}_failure_demo_t{t}.png      Failure-demo maps (default run only)
 ```
 
 ---
