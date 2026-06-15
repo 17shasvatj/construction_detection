@@ -1,12 +1,20 @@
 """
 Step 4: Validate label quality.
 
-Runs NDVI separation, density check, mean NDVI trajectory, and DW class
-distribution of confirmed pixels — statistical sanity-check on the labeling
-method's outputs.
+Two modes (composable — pass both flags to run both):
+
+  --diagnostics  (default when no flags given)
+      NDVI separation, density check, mean NDVI trajectory, DW class
+      distribution of confirmed pixels.
+
+  --spot-check N
+      Sample N confirmed-trajectory pixels spatially stratified, print
+      one row per site with coordinates and label-transition quarters.
 
 Usage:
     python validate_labels.py --aoi babcock
+    python validate_labels.py --aoi babcock --spot-check 30
+    python validate_labels.py --aoi babcock --diagnostics --spot-check 30
 """
 
 import numpy as np
@@ -104,6 +112,71 @@ def run_diagnostics(data_dir: Path):
     print(f"{'=' * 60}")
 
 
+# ── Spot-check ────────────────────────────────────────────────────────────────
+
+def run_spot_check(aoi: str, n: int, data_root: Path, seed: int = 42):
+    """Sample n confirmed-trajectory pixels and print one row per site."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from spot_check import (
+        load_aoi, pixel_to_lonlat,
+        label_transitions, stratified_sample,
+        format_row, format_label_transitions,
+        DW_NAMES as SC_DW_NAMES,
+    )
+
+    d = load_aoi(aoi, str(data_root))
+    label_cube = np.array(d['label_cube'])
+    dw_cube    = d['dw_cube']
+    quarters   = d['quarters']
+    bbox, H, W = d['bbox'], d['H'], d['W']
+
+    ever_g = (label_cube == 1).any(axis=0)
+    ever_b = (label_cube == 2).any(axis=0)
+    confirmed = ever_g & ever_b
+
+    print("=" * 72)
+    print(f"SPOT-CHECK SITES — {aoi}  (confirmed-trajectory pixels: {int(confirmed.sum())})")
+    print("=" * 72)
+
+    if confirmed.sum() == 0:
+        print("No confirmed-trajectory pixels in this AOI. Nothing to sample.")
+        return
+
+    sites = stratified_sample(confirmed, n, seed=seed)
+    if not sites:
+        print("Stratified sampling returned 0 sites — mask appears empty.")
+        return
+
+    print(f"Sampled {len(sites)} sites (target: {n}, 4×4 spatial stratification)\n")
+
+    for i, (y, x) in enumerate(sites, start=1):
+        lon, lat = pixel_to_lonlat(y, x, bbox, H, W)
+
+        if dw_cube is not None:
+            from spot_check import dw_trajectory
+            dw_traj = dw_trajectory(np.array(dw_cube), y, x, names=SC_DW_NAMES)
+        else:
+            dw_traj = '(no dw_cube.npy)'
+
+        g_onset, b_onset = label_transitions(label_cube, y, x, quarters)
+        transitions_str  = format_label_transitions(g_onset, b_onset)
+
+        print(format_row(
+            idx=i,
+            class_name='confirmed',
+            lat=lat,
+            lon=lon,
+            dw_traj=dw_traj,
+            label_transitions_str=transitions_str,
+            # url omitted intentionally
+        ))
+
+    print()
+    print("Tally these in Google Earth Pro's historical slider.")
+    print("Use the grading/built onset quarters to know which dates to compare.")
+    print("Record counts as: real / ambiguous / wrong.")
+
+
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -112,7 +185,22 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Validate label quality")
     parser.add_argument("--aoi", required=True, choices=list(AOIS))
+    parser.add_argument("--diagnostics", action="store_true",
+                        help="Run NDVI/density/trajectory/DW diagnostics.")
+    parser.add_argument("--spot-check", type=int, default=0, metavar="N",
+                        help="Print N confirmed-trajectory spot-check sites.")
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
+    if not args.diagnostics and args.spot_check == 0:
+        args.diagnostics = True
+
     data_dir = Path(DATA_ROOT) / args.aoi
-    run_diagnostics(data_dir)
+
+    if args.diagnostics:
+        run_diagnostics(data_dir)
+
+    if args.spot_check > 0:
+        if args.diagnostics:
+            print()
+        run_spot_check(args.aoi, args.spot_check, Path(DATA_ROOT), seed=args.seed)

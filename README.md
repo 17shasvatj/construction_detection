@@ -81,10 +81,9 @@ python run_pipeline.py --aoi babcock --force
 
 **Label validation** (optional, after `generate_labels`):
 ```bash
-python validate_labels.py --aoi babcock
+python validate_labels.py --aoi babcock                  # NDVI/density diagnostics
+python validate_labels.py --aoi babcock --spot-check 30  # + 30 sampled sites with transition quarters
 ```
-Prints NDVI separation, density check, mean NDVI trajectory, and DW class distribution
-for confirmed pixels — sanity-check on the labeling method's outputs.
 
 ---
 

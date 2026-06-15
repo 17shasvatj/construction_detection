@@ -169,18 +169,21 @@ def format_row(
     lat: float,
     lon: float,
     dw_traj: str,
-    url: str,
+    url: str = None,
     label_transitions_str: str = None,
 ) -> str:
     """
-    Format one spot-check row. If label_transitions_str is provided (e.g.
-    'grading: 2022-Q4 -> built: 2024-Q2'), it is included; otherwise the row
-    falls back to the simpler 4-field layout used by demo / prediction sites.
+    Format one spot-check row. url and label_transitions_str are both optional;
+    omit url to suppress the Google Earth link (e.g. for label validation output).
     """
     base = f"[{idx:02d}] {class_name:<12} | {lat:.4f}, {lon:.4f} | DW: {dw_traj}"
-    if label_transitions_str:
+    if label_transitions_str and url:
         return f"{base} | {label_transitions_str} | {url}"
-    return f"{base} | {url}"
+    if label_transitions_str:
+        return f"{base} | {label_transitions_str}"
+    if url:
+        return f"{base} | {url}"
+    return base
 
 
 def format_label_transitions(grading_onset: str, built_onset: str) -> str:
