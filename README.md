@@ -81,8 +81,8 @@ python run_pipeline.py --aoi babcock --force
 
 **Label validation** (optional, after `generate_labels`):
 ```bash
-python validate_labels.py babcock          # NDVI separation + class density check
-python validate_labels.py babcock --spot-check 30   # + 30 Google Earth URLs to verify manually
+python validate_labels.py --aoi babcock          # NDVI separation + class density check
+python validate_labels.py --aoi babcock --spot-check 30   # + 30 Google Earth URLs to verify manually
 ```
 
 ---
