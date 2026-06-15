@@ -81,9 +81,10 @@ python run_pipeline.py --aoi babcock --force
 
 **Label validation** (optional, after `generate_labels`):
 ```bash
-python validate_labels.py --aoi babcock          # NDVI separation + class density check
-python validate_labels.py --aoi babcock --spot-check 30   # + 30 Google Earth URLs to verify manually
+python validate_labels.py --aoi babcock
 ```
+Prints NDVI separation, density check, mean NDVI trajectory, and DW class distribution
+for confirmed pixels — sanity-check on the labeling method's outputs.
 
 ---
 
@@ -171,13 +172,6 @@ outputs/figures/
 After evaluation, generate a one-page reviewer artifact and a list of sites to verify
 manually in Google Earth.
 
-**Spot-check from labels** (no predictions needed):
-```bash
-python validate_labels.py wendell --spot-check 30
-```
-Prints 30 confirmed-trajectory sites with Google Earth URLs. Click each, check the
-historical imagery slider, tally real / ambiguous / wrong.
-
 **Reviewer demo** (requires `predictions.npy` at `data/{aoi}/predictions.npy`):
 ```bash
 python make_demo.py wendell
@@ -212,6 +206,6 @@ python train/train.py --device cuda --data-root data --epochs 50
 # 4. Evaluate
 python train/evaluate.py --device cuda --data-root data
 
-# 5. Spot-check labels (no model needed)
-python validate_labels.py wendell --spot-check 30
+# 5. Validate labels (optional, after generate_labels)
+python validate_labels.py --aoi wendell
 ```

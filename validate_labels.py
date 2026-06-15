@@ -1,25 +1,12 @@
 """
 Step 4: Validate label quality.
 
-Two modes (composable — pass both flags to do both in one run):
-
-  --diagnostics  (default if no flags given)
-      NDVI separation, density check, mean NDVI trajectory, DW class
-      distribution of confirmed pixels. Statistical sanity-check on the
-      labeling method's outputs. Same as the original validate_labels.py.
-
-  --spot-check N
-      Sample N confirmed-trajectory pixels (pixels that pass through both
-      grading and constructed phases) stratified spatially, and print one
-      row per site with Google Earth URLs + label-transition quarters.
-      Click each URL and tally manually in Google Earth Pro's historical
-      slider — this is the independent ground-truth check that pairs with
-      the diagnostics.
+Runs NDVI separation, density check, mean NDVI trajectory, and DW class
+distribution of confirmed pixels — statistical sanity-check on the labeling
+method's outputs.
 
 Usage:
-    python -m pipeline.validate_labels --aoi babcock
-    python -m pipeline.validate_labels --aoi babcock --spot-check 30
-    python -m pipeline.validate_labels --aoi babcock --diagnostics --spot-check 30
+    python validate_labels.py --aoi babcock
 """
 
 import numpy as np
@@ -117,104 +104,15 @@ def run_diagnostics(data_dir: Path):
     print(f"{'=' * 60}")
 
 
-# ── Spot-check (new) ──────────────────────────────────────────────────────────
-
-def run_spot_check(aoi: str, n: int, data_root: Path, seed: int = 42):
-    """
-    Sample n confirmed-trajectory pixels and print one Google Earth row per site.
-    """
-    # Add repo root to path so `spot_check` resolves (mirrors __main__ block below).
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from spot_check import (
-        load_aoi, pixel_to_lonlat, earth_url, dw_trajectory,
-        label_transitions, stratified_sample,
-        format_row, format_label_transitions,
-        DW_NAMES as SC_DW_NAMES, LABEL_NAMES,
-    )
-
-    d = load_aoi(aoi, str(data_root))
-    label_cube = np.array(d['label_cube'])     # materialize for boolean ops
-    dw_cube    = d['dw_cube']
-    quarters   = d['quarters']
-    bbox       = d['bbox']
-    H, W       = d['H'], d['W']
-
-    # Confirmed = pixels that hit BOTH grading (1) and constructed (2) over time.
-    ever_g = (label_cube == 1).any(axis=0)
-    ever_b = (label_cube == 2).any(axis=0)
-    confirmed = ever_g & ever_b
-
-    print("=" * 72)
-    print(f"SPOT-CHECK SITES — {aoi}  (confirmed-trajectory pixels: {int(confirmed.sum())})")
-    print("=" * 72)
-
-    if confirmed.sum() == 0:
-        print("No confirmed-trajectory pixels in this AOI. Nothing to sample.")
-        return
-
-    sites = stratified_sample(confirmed, n, seed=seed)
-    if not sites:
-        print("Stratified sampling returned 0 sites — mask appears empty.")
-        return
-
-    print(f"Sampled {len(sites)} sites (target: {n}, 4×4 spatial stratification)\n")
-
-    for i, (y, x) in enumerate(sites, start=1):
-        lon, lat = pixel_to_lonlat(y, x, bbox, H, W)
-        url      = earth_url(lat, lon)
-
-        # DW land-cover trajectory — only if dw_cube is present.
-        if dw_cube is not None:
-            dw_traj = dw_trajectory(np.array(dw_cube), y, x, names=SC_DW_NAMES)
-        else:
-            dw_traj = '(no dw_cube.npy)'
-
-        # Label transitions — when did this pixel enter grading, then built.
-        g_onset, b_onset = label_transitions(label_cube, y, x, quarters)
-        transitions_str  = format_label_transitions(g_onset, b_onset)
-
-        print(format_row(
-            idx=i,
-            class_name='confirmed',
-            lat=lat,
-            lon=lon,
-            dw_traj=dw_traj,
-            url=url,
-            label_transitions_str=transitions_str,
-        ))
-
-    print()
-    print("Tally these in Google Earth Pro's historical slider.")
-    print("Use the grading/built onset quarters to know which dates to compare.")
-    print("Record counts as: real / ambiguous / wrong  (don't force ambiguous into the others).")
-
-
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import argparse
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from config import AOIS, DATA_ROOT
 
     parser = argparse.ArgumentParser(description="Validate label quality")
     parser.add_argument("--aoi", required=True, choices=list(AOIS))
-    parser.add_argument("--diagnostics", action="store_true",
-                        help="Run NDVI/density/trajectory/DW diagnostics (original behaviour).")
-    parser.add_argument("--spot-check", type=int, default=0, metavar="N",
-                        help="Print N Google Earth spot-check sites for confirmed pixels.")
-    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    # Default to diagnostics when no mode is selected.
-    if not args.diagnostics and args.spot_check == 0:
-        args.diagnostics = True
-
     data_dir = Path(DATA_ROOT) / args.aoi
-
-    if args.diagnostics:
-        run_diagnostics(data_dir)
-
-    if args.spot_check > 0:
-        if args.diagnostics:
-            print()  # blank line between sections
-        run_spot_check(args.aoi, args.spot_check, Path(DATA_ROOT), seed=args.seed)
+    run_diagnostics(data_dir)
