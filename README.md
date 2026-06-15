@@ -176,28 +176,6 @@ Outputs:
 
 ---
 
-## Step 4 — Reviewer demo and spot-check (optional)
-
-After evaluation, generate a one-page reviewer artifact and a list of sites to verify
-manually in Google Earth.
-
-**Reviewer demo** (requires `predictions.npy` at `data/{aoi}/predictions.npy`):
-```bash
-python make_demo.py wendell
-```
-
-Writes to `outputs/demo/wendell/`:
-- `map.png` — 3-panel figure: model prediction | DW labels | disagreement
-- `metrics.json` — per-pixel P/R vs DW labels + placeholder Google Earth tally
-- `demo.md` — one-page markdown for Fuxun (embeds map + metrics + site list)
-
-Use `--dry-run` to preview what would be sampled/written without touching disk:
-```bash
-python make_demo.py wendell --dry-run
-```
-
----
-
 ## Quick reference
 
 ```bash
