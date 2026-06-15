@@ -23,6 +23,12 @@ AOIS = {
        "biome": "hill_country_oak_savanna",
         "role": "train",
    },
+   "lakewood_ranch": {
+       "name": "Lakewood Ranch East (Taylor Ranch expansion), FL",
+       "bbox": [-82.37, 27.42, -82.31, 27.48],
+       "biome": "fl_subtropical_wetland_pine",
+       "role": "test_same_biome",
+   },
     "celina": {
         "name": "Celina, TX",
         "bbox": [-96.78, 33.32, -96.73, 33.36],  # shifted east,
