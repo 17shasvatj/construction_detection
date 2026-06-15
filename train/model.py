@@ -193,9 +193,14 @@ def load_model(
                     {'name': 'LearnedInterpolateToPyramidal'},
                 ],
                 decoder='UNetDecoder',
-                decoder_channels=[512, 256, 128, 64],
+                # Decoder channels halved from [512,256,128,64] → [256,128,64,32]
+                # to reduce trainable head capacity on the small (~225-patch)
+                # dataset. With heavier dropout below + weight_decay=1e-1 in the
+                # optimizer + focal loss, this set of regularization changes
+                # targets the val_loss-diverges-after-epoch-2 overfit pattern.
+                decoder_channels=[256, 128, 64, 32],
                 num_classes=num_classes,
-                head_dropout=0.1,
+                head_dropout=0.3,
             )
             terratorch_model = factory.build_model(**build_kwargs)
             print(f'[model] Backbone loaded: {backbone_name}')

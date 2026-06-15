@@ -67,6 +67,59 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
+# ── focal loss ─────────────────────────────────────────────────────────────────
+
+class FocalLoss(nn.Module):
+    """
+    Multi-class focal loss with class weights and ignore_index.
+    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+
+    Down-weights easy examples (typically baseline) and up-weights hard examples
+    (grading + boundary-of-construction pixels). Standard fix for severe class
+    imbalance where weighted CE underperforms — directly addresses the
+    grading-class collapse seen in CE-trained checkpoints on this dataset.
+    """
+    def __init__(self, gamma=2.0, alpha=None, ignore_index=255, reduction='mean'):
+        super().__init__()
+        self.gamma = gamma
+        self.alpha = alpha            # (C,) tensor of class weights, or None
+        self.ignore_index = ignore_index
+        self.reduction = reduction
+
+    def forward(self, logits, target):
+        # logits: (B, C, H, W)  target: (B, H, W) int64
+        log_probs = torch.log_softmax(logits, dim=1)
+        probs     = log_probs.exp()
+
+        # Valid (non-ignore) pixel mask
+        valid = target != self.ignore_index
+
+        # Temporarily clamp ignore values to 0 so gather doesn't OOB
+        target_safe = target.clone()
+        target_safe[~valid] = 0
+
+        # Per-pixel log p_t and p_t (probability assigned to the true class)
+        log_pt = log_probs.gather(1, target_safe.unsqueeze(1)).squeeze(1)   # (B, H, W)
+        pt     = probs.gather(1,    target_safe.unsqueeze(1)).squeeze(1)
+
+        focal_weight = (1.0 - pt) ** self.gamma
+
+        if self.alpha is not None:
+            alpha_t = self.alpha.to(logits.device)[target_safe]   # (B, H, W)
+            loss = -alpha_t * focal_weight * log_pt
+        else:
+            loss = -focal_weight * log_pt
+
+        # Zero out ignored pixels
+        loss = loss * valid.float()
+
+        if self.reduction == 'mean':
+            return loss.sum() / valid.float().sum().clamp(min=1)
+        elif self.reduction == 'sum':
+            return loss.sum()
+        return loss
+
+
 # ── class weights ──────────────────────────────────────────────────────────────
 
 def compute_class_weights(
@@ -232,7 +285,7 @@ def parse_args():
     p.add_argument('--epochs',      type=int,   default=50)
     p.add_argument('--batch-size',  type=int,   default=4)
     p.add_argument('--lr',          type=float, default=1e-3)
-    p.add_argument('--patience',    type=int,   default=10)
+    p.add_argument('--patience',    type=int,   default=15)
     p.add_argument('--seed',        type=int,   default=SEED)
     p.add_argument('--data-root',   default=DATA_ROOT)
     p.add_argument('--output-dir',  default=OUTPUT_DIR)
@@ -328,9 +381,14 @@ def main():
 
     # ── optimizer + loss ───────────────────────────────────────────────────────
     head_params = model.head_params() if hasattr(model, 'head_params') else list(model.parameters())
-    optimizer   = AdamW(head_params, lr=args.lr, weight_decay=1e-4)
+    # weight_decay raised from 1e-4 → 1e-1 to combat small-dataset overfit
+    # (val_loss diverged after epoch 1-2 on CE-with-weights training).
+    optimizer   = AdamW(head_params, lr=args.lr, weight_decay=1e-1)
     scheduler   = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
-    criterion   = nn.CrossEntropyLoss(weight=class_weights, ignore_index=IGNORE_LABEL)
+    # Focal loss (γ=2.0) replaces weighted CE: directly down-weights baseline
+    # (easy class, ~88% of pixels) and up-weights grading (rare class, <1%) and
+    # construction-boundary pixels.
+    criterion   = FocalLoss(gamma=2.0, alpha=class_weights, ignore_index=IGNORE_LABEL)
 
     # ── run config ─────────────────────────────────────────────────────────────
     run_config = {
@@ -341,6 +399,8 @@ def main():
         'batch_size':     args.batch_size,
         'lr':             args.lr,
         'patience':       args.patience,
+        'weight_decay':   1e-1,
+        'loss':           'focal_gamma2_alpha_class_weights',
         'smoke_test':     args.smoke_test,
         'train_aois':     TRAIN_AOIS,
         'val_aois':       VAL_AOIS,
@@ -361,7 +421,7 @@ def main():
     print(f'[train] Run config saved → {run_config_path}\n')
 
     # ── training loop ──────────────────────────────────────────────────────────
-    best_val_loss  = float('inf')
+    best_val_loss     = float('inf')
     epochs_no_improve = 0
     history = []
 

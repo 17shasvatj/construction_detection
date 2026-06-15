@@ -192,7 +192,13 @@ def _augment(
     spectral: torch.Tensor,   # (K, 6, P, P)
     target:   torch.Tensor,   # (P, P)
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Random hflip / vflip / rot90 + per-band spectral jitter. Train split only."""
+    """Random hflip / vflip / rot90 + per-band spectral jitter. Train split only.
+
+    Spectral jitter expanded from ±10% to ±20% as part of regularization stack
+    against small-dataset overfitting (val_loss diverged after epoch 1-2 on
+    ±10% jitter). Stronger augmentation effectively expands the dataset by
+    making each patch look more different across epochs.
+    """
     if random.random() < 0.5:
         spectral = torch.flip(spectral, dims=[-1])
         target   = torch.flip(target,   dims=[-1])
@@ -203,7 +209,8 @@ def _augment(
     if k:
         spectral = torch.rot90(spectral, k=k, dims=[-2, -1])
         target   = torch.rot90(target,   k=k, dims=[-2, -1])
-    scale    = 0.9 + 0.2 * torch.rand(1, 6, 1, 1)
+    # ±20% per-band multiplicative jitter (was ±10%)
+    scale    = 0.8 + 0.4 * torch.rand(1, 6, 1, 1)
     spectral = spectral * scale
     return spectral, target
 
